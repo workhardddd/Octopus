@@ -27,6 +27,12 @@ design rationale. **Code comments cite these by filename + section** (e.g.
 - **[plans/memory.md](plans/memory.md)** — per-agent native memory.
 - **[plans/harness-layer.md](plans/harness-layer.md)** — the one-harness,
   profile-per-backend runtime boundary.
+- **[plans/dsh-harness.md](plans/dsh-harness.md)** — DSH (DeepSeek Harness) as a
+  first-class engine, and now the default one: turns over ACP, one-shots over
+  `headless`, a per-agent `DSH_HOME` with a generated patch, the declared
+  degradations, and the conformance test that keeps the patch honest against
+  the installed CLI. Decision record for its posture:
+  [`adr/0001-dsh-unfenced-execution.md`](adr/0001-dsh-unfenced-execution.md).
 - **[plans/agent-collaboration.md](plans/agent-collaboration.md)** —
   agent-to-agent delegation (the `mcp__ask_agent__*` tools). Reverses
   the explicit "no A2A" carve-out in `agent-refactor.md` §40-41.

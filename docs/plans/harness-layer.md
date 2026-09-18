@@ -9,6 +9,23 @@ stay top-level, *wrapped* by the harness login drivers — not relocated.
 Verified green at implementation time; current suite counts: ~764 backend
 tests + 64 frontend (vitest) + tsc + 62 e2e (Playwright).
 
+Updated 2026-09-19: there are now **three** profile values. `dsh` landed on
+the same contract (`docs/plans/dsh-harness.md`), which forced exactly two
+generalizations here and nothing else:
+
+- `StdinMode` gained `PROTOCOL`, and a profile may now supply a
+  `TerminalProtocol` (`new_protocol`) for a runtime whose stdio carries a
+  request/response conversation rather than raw prompt frames. The engine routes
+  a stdout line to events, to a pending request's response, or to the protocol
+  as a server→client request; the two frame-on-stdin modes are unchanged.
+- `reusable` (a process serves more than one turn) was split from `can_steer` (a
+  message can be injected mid-turn): a protocol backend reuses its process but
+  takes one turn at a time, so it queues instead of steering.
+- `Turns`/`one-shots` also gained optional per-spawn filesystem hooks
+  (`prepare_spawn`/`prepare_oneshot`) and `cleanup_session`, so a harness that
+  keeps its own state on disk can provision and drop it without any
+  backend-kind branching in feature code.
+
 ## 0. Why this exists
 
 Octopus has a good *per-turn* backend abstraction (`BackendBase` in

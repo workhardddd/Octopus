@@ -1,8 +1,34 @@
 # Tech Plan: DSH as a first-class harness kind
 
-Status: proposed (2026-09-18) — design agreed in review; **nothing implemented
-yet**. Supersedes nothing: `harness-layer.md` still describes the layer this
-adds a third kind to, and `codex-backend.md` still describes Codex.
+Status: **implemented** (2026-09-19) — all six phases landed on
+`feature/dsh-harness` (5 commits). What the phases actually contained, where it
+differed from the sketch above, and what is verified:
+
+- **Phase 1-2** also carried the per-agent home and the generated patch
+  (`server/dsh_home.py`), because a real DSH turn cannot run without them — the
+  sketch put them in phase 4, and leaving them out would have made phase 2
+  verifiable only against the fake CLI.
+- The engine's protocol collaborator is `RuntimeProfile.new_protocol` (a
+  *factory*, like `new_event_parser`), and `EventParser` grew `flush()` so a
+  parser that coalesces ACP's `messageId` chunks can emit the message before the
+  turn's terminal event.
+- **Verified against the real CLI** (dsh 0.1.5-rc.2, this machine):
+  `tests/test_dsh_profile_conformance.py` 4/4 — including the guard that the
+  shipped rows still carry exactly the fields the patch restates — and
+  `tests/test_backend_dsh_real.py` 5/5 in ~33s (a real turn, a second turn on
+  the held process, a resume across a fresh process, a `headless` one-shot, and
+  a rejected key classified as an auth error). `web/e2e/dsh.spec.ts` adds a
+  mocked dialog test and a real turn through the UI (8.4s).
+- **Two open items from §3.5, both resolved rather than deferred**: the
+  `sandbox-policy.mode` vs `permission.defaultPreset` question (DSH *infers* a
+  preset, so the patch names it explicitly — the conformance test would fail if
+  that stopped being accepted), and the symlinked-profile / symlinked-`AGENTS.md`
+  questions (both work where symlinks exist; where they do not, the view falls
+  back to a copy refreshed each spawn, and the profile workspace falls back to
+  DSH initializing its own).
+- **Supersedes nothing**: `harness-layer.md` still describes the layer this adds
+  a third kind to (with a dated note on the two generalizations it forced), and
+  `codex-backend.md` still describes Codex.
 
 ## 0. Why this exists
 

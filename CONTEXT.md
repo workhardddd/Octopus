@@ -45,6 +45,13 @@ Which runtime a session runs on: `claude-code`, `codex` or `dsh`. The
 persisted and wire field that holds it is `backend`.
 _Avoid_: backend (when you mean the layer), engine, provider
 
+**Default engine**:
+The harness kind a *new* agent or session starts on — `dsh`. `GET /api/backends`
+lists it first, so the server is the single place that decides it and clients
+read it rather than repeating it. Existing rows keep whatever they were created
+with.
+_Avoid_: default backend, primary engine
+
 **Runtime profile**:
 The data record that describes one harness kind — binary, prompt blurb,
 credential style, argv rendering, event parsing, capability flags.
