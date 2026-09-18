@@ -248,6 +248,11 @@ async def test_session_info_reports_the_steering_capability(client):
     assert _can_steer("claude-code") is True
     # Codex's prompt lives in argv; it keeps queue-until-idle.
     assert _can_steer("codex") is False
+    # DSH reuses its process between turns but has no mid-turn input channel —
+    # ACP takes one prompt at a time — so it queues too. The same declared
+    # degradation as codex, arrived at for a different reason
+    # (dsh-harness.md §10.2).
+    assert _can_steer("dsh") is False
     # An unknown backend must not claim a capability it can't honour.
     assert _can_steer("nonsense-backend") is False
 
@@ -262,6 +267,12 @@ async def test_session_info_reports_the_steering_capability(client):
     )
     assert cx.status_code == 201
     assert cx.json()["can_steer"] is False
+
+    dsh = await client.post(
+        "/api/sessions", headers=HEADERS, json={"name": "Dsh", "backend": "dsh"}
+    )
+    assert dsh.status_code == 201
+    assert dsh.json()["can_steer"] is False
 
 
 @pytest.mark.asyncio
