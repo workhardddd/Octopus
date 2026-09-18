@@ -456,6 +456,18 @@ export function AgentFormPage({
                 </div>
               </div>
 
+              {backend === "dsh" && (
+                // A declared degradation has to be visible where the user would
+                // otherwise assume the setting works (dsh-harness.md §10).
+                <p className="text-xs text-muted-foreground">
+                  Neither field below is enforced on DSH: it composes its tool
+                  set per process, and ACP has no per-turn tool policy — so the
+                  allow/deny list applies on Claude Code, and there is no
+                  equivalent of its <code>--agents</code> either. DSH's own
+                  sub-agent tool stays available to it.
+                </p>
+              )}
+
               <SubagentEditor value={subagents} onChange={setSubagents} />
             </div>
           )}
