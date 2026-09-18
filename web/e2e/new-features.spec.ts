@@ -765,6 +765,12 @@ test.describe("Credentials Panel", () => {
     // credential unless you say otherwise, so they're one click in.
     await addOctoSession(page);
     await page.locator(".btn-session-advanced").click();
+    // The credential selector is engine-scoped, and the default engine is not
+    // the one this credential belongs to — pick that engine first, so the test
+    // is about the selector rather than about which engine is the default.
+    const engine = page.locator(".session-backend-select");
+    await expect(engine).toBeVisible();
+    await engine.selectOption("claude-code");
 
     const selector = page.locator(".session-credential-select");
     await expect(selector).toBeVisible();

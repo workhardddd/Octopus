@@ -222,16 +222,18 @@ app.include_router(ws.router)
 
 @app.get("/api/backends")
 async def list_backends(_: str = Depends(verify_token)):
-    """Which AI backends are usable on this host (codex-backend.md §6.1).
-    A harness kind appears only when its CLI resolves on PATH — except the
-    default kind, which is always listed even before it is installed (the
-    historical contract, and what lets a fresh install pick an engine)."""
+    """Which AI backends are usable on this host (codex-backend.md §6.1), with
+    the default kind FIRST.
+
+    A kind appears only when its CLI resolves on PATH — except the default kind,
+    which is always listed even before it is installed (the historical
+    contract, and what lets a fresh install pick an engine). Order matters:
+    clients read the first entry as the default, so the default is also what a
+    picker pre-selects."""
     from .harness import DEFAULT_BACKEND, available_backends
 
-    available = available_backends()
-    if DEFAULT_BACKEND not in available:
-        available = [DEFAULT_BACKEND, *available]
-    return {"available": available}
+    available = [b for b in available_backends() if b != DEFAULT_BACKEND]
+    return {"available": [DEFAULT_BACKEND, *available]}
 
 
 @app.get("/health")
