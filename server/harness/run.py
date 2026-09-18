@@ -199,6 +199,9 @@ class RunConfig:
     # `~/.dsh`.
     dsh_home: str | None = None
     dsh_patch: str | None = None
+    # The owning agent, when there is one. Neutral, and what a profile derives
+    # its own per-agent paths from.
+    agent_id: str | None = None
 
 
 class HarnessRun:
@@ -292,6 +295,7 @@ class HarnessRun:
             subagents=self._config.subagents,
             dsh_home=self._config.dsh_home,
             dsh_patch=self._config.dsh_patch,
+            agent_id=self._config.agent_id,
         )
 
     def build_argv(
@@ -320,6 +324,11 @@ class HarnessRun:
 
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         self._ctx = ctx
+        # A profile that has to write something to run (DSH's per-agent home
+        # and generated patch) does it here, not in `build_argv`: rendering the
+        # command for inspection must stay side-effect free.
+        if self._profile.prepare_spawn is not None:
+            self._profile.prepare_spawn(ctx)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
 

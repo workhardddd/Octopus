@@ -153,10 +153,13 @@ async def delete_credential(credential_id: str, _: str = Depends(verify_token)):
     if not deleted:
         raise HTTPException(status_code=404, detail="credential not found")
     # Revoke any on-disk login state for this credential's harness (Codex
-    # rmtree's its CODEX_HOME; Claude has nothing on disk). The harness owns
-    # the cleanup — no backend-kind branching here.
+    # rmtree's its CODEX_HOME; Claude has nothing on disk, and DSH takes a
+    # pasted key with no login state at all). The harness owns the cleanup —
+    # no backend-kind branching here.
     if row is not None and has_backend(row.get("backend")):
-        get_harness(row["backend"]).login.cleanup_credential(credential_id)
+        login = get_harness(row["backend"]).login
+        if login is not None:
+            login.cleanup_credential(credential_id)
 
 
 # ---------------------------------------------------------------------------

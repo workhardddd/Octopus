@@ -194,6 +194,11 @@ class Harness:
 
         The profile builds the argv (applying the credential its own way)
         and extracts the result text from stdout."""
+        if self.profile.prepare_oneshot is not None:
+            # The same contract as a turn's `prepare_spawn`: whatever has to
+            # exist on disk before the process starts (DSH's home) is written
+            # here, not while rendering the command.
+            self.profile.prepare_oneshot(ctx)
         argv, kwargs = self.profile.build_oneshot_argv(ctx)
         try:
             argv, kwargs = prepare_spawn(argv, kwargs)

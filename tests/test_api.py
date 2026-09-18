@@ -223,10 +223,15 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
 
 
 @pytest.mark.asyncio
-async def test_list_backends_includes_claude_code(client):
+async def test_list_backends_always_lists_the_default_kind(client):
+    """The default kind is listed even on a host where its CLI is absent, so a
+    fresh install can still pick an engine (codex-backend.md §6.1). Every other
+    kind appears only when its binary resolves on PATH."""
+    from server.harness import DEFAULT_BACKEND
+
     resp = await client.get("/api/backends", headers=HEADERS)
     assert resp.status_code == 200
-    assert "claude-code" in resp.json()["available"]
+    assert DEFAULT_BACKEND in resp.json()["available"]
 
 
 @pytest.mark.asyncio

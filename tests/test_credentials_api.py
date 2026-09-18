@@ -609,7 +609,11 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
     session_manager.sessions.clear()
     await session_manager.initialize(db)
     agent = await AgentManager(db).create_agent(name="Swapper")
-    session = await session_manager.create_session(agent_id=agent["id"], name="s")
+    # Pinned: the credential below is a claude-code one, and a session may only
+    # be repointed at a credential its own harness can run.
+    session = await session_manager.create_session(
+        agent_id=agent["id"], name="s", backend="claude-code"
+    )
 
     new_id = (
         await c.post(

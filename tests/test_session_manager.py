@@ -31,12 +31,22 @@ async def manager():
         await db.close()
 
 
-async def _new(manager, name="S", working_dir=None, credential_id=None, origin="user"):
-    """Create a session under the Default Agent (created by migration)."""
+async def _new(
+    manager, name="S", working_dir=None, credential_id=None, origin="user",
+    backend="claude-code",
+):
+    """Create a session under the Default Agent (created by migration).
+
+    The backend is pinned rather than left to the registry default: these tests
+    exercise claude-code behavior — its premature-exit respawn, its OAuth env
+    vars, its argv — and a test that is *about* the default kind should say so
+    by passing `backend=None`.
+    """
     agent = await manager.db.get_system_agent()
     _create = manager.create_session
     return await _create(
-        agent["id"], name, working_dir, credential_id=credential_id, origin=origin
+        agent["id"], name, working_dir, credential_id=credential_id,
+        origin=origin, backend=backend,
     )
 
 
@@ -920,7 +930,7 @@ async def test_make_run_applies_agent_config(manager):
         tool_allow="Read\nGrep",
         tool_deny="Bash",
     )
-    session = await manager.create_session(aid, name="S")
+    session = await manager.create_session(aid, name="S", backend="claude-code")
     agent = await manager.db.get_agent(aid)
     backend = manager._make_run(session, agent)
     argv, _ = backend.build_argv("hi", session.working_dir, None)

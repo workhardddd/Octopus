@@ -23,6 +23,7 @@ from .large_prompts import (
     spill_if_large,
 )
 from .harness import (
+    DEFAULT_BACKEND,
     BackendForkNotSupported,
     HarnessCredential,
     HarnessEvent,
@@ -229,8 +230,8 @@ class Session:
     # transient child spawned by an agent-to-agent ask_agent call
     # (agent-collaboration.md §5.2).
     origin: str = "user"
-    # Which AI backend drives this session ('claude-code' | 'codex').
-    backend: str = "claude-code"
+    # Which AI backend drives this session ('claude-code' | 'codex' | 'dsh').
+    backend: str = DEFAULT_BACKEND
     # Agent-to-agent: parent session that spawned this delegation, or None
     # for every non-delegation session. Used by the delegation listener to
     # route replies/questions/errors back to the parent and by guards to
@@ -1110,7 +1111,7 @@ class SessionManager:
         working_dir: str | None = None,
         credential_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
@@ -1615,6 +1616,15 @@ class SessionManager:
         # row is still gone, which is the user-visible expectation.
         delete_session_attachments(session_id)
         delete_session_large_prompts(session_id)
+        # A harness that keeps its own conversation store drops it here too.
+        # No kind branching: the profile owns its store's lifecycle, the same
+        # way it owns credential cleanup on delete.
+        cleanup = get_harness(session.backend).profile.cleanup_session
+        if cleanup is not None:
+            try:
+                cleanup(session.agent_id, session.claude_session_id)
+            except Exception:
+                logger.exception("harness session cleanup failed for %s", session_id)
         return True
 
     async def _persist_message(
@@ -3036,6 +3046,10 @@ class SessionManager:
             memory_dir=memory_dir,
             fork_note=fork_note,
             subagents=subagents,
+            # Neutral, and the only thing a per-agent harness facility needs:
+            # DSH derives its home, memory view and patch from the agent
+            # (dsh-harness.md §3.5). Every other kind ignores it.
+            agent_id=session.agent_id,
         )
 
     # Refresh the access_token if it expires within this many seconds. A

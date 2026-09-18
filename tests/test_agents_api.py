@@ -318,7 +318,9 @@ async def test_schedule_from_text_ai_cron(client, monkeypatch):
 
     monkeypatch.setattr(get_harness("claude-code"), "run_oneshot", fake_oneshot)
 
-    agent = await _create_agent(client, name="NL Sched")
+    # Pinned: the mock above stands in for claude-code's one-shot, so the agent
+    # has to be a claude-code agent rather than whatever the registry default is.
+    agent = await _create_agent(client, name="NL Sched", backend="claude-code")
     resp = await client.post(
         f"/api/agents/{agent['id']}/schedules/from_text",
         json={

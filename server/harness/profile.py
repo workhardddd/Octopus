@@ -87,6 +87,9 @@ class TurnContext:
     # which is exactly what the per-agent home exists to prevent.
     dsh_home: str | None = None
     dsh_patch: str | None = None
+    # The owning agent, when there is one. Neutral — every kind may see it, and
+    # it is what a profile derives its own per-agent paths from.
+    agent_id: str | None = None
 
 
 @dataclass
@@ -100,6 +103,8 @@ class OneShotContext:
     # DSH's per-agent home (dsh-harness.md §3.5). Required for a DSH one-shot:
     # without it the process would read and write the user's own `~/.dsh`.
     dsh_home: str | None = None
+    # The owning agent, when there is one (see `TurnContext.agent_id`).
+    agent_id: str | None = None
 
 
 @dataclass
@@ -278,6 +283,21 @@ class RuntimeProfile:
     # instance per run is what keeps two concurrent runs of the same harness
     # from answering each other's frames.
     new_protocol: Callable[[], TerminalProtocol] | None = None
+    #: Per-spawn preparation that *does* touch the filesystem, given the fully
+    #: assembled context and free to fill in whatever the profile needs there
+    #: (DSH writes the agent's home, its generated patch and its memory view).
+    #: Deliberately NOT part of the argv rendering path: `build_argv` promises
+    #: to be side-effect free, so inspection never creates anything, and a
+    #: profile with one of these renders its real argv only at `start()`.
+    prepare_spawn: Callable[[TurnContext], None] | None = None
+    #: The one-shot counterpart of `prepare_spawn`.
+    prepare_oneshot: Callable[[OneShotContext], None] | None = None
+    #: Delete whatever this harness keeps on disk for one conversation, given
+    #: the owning agent id and the session's resume id. A harness whose engine
+    #: stores sessions itself needs this on Octopus's hard session delete —
+    #: DSH has no deletion API of its own (dsh-harness.md §3.5). Best-effort by
+    #: contract: a failure here must never fail the delete.
+    cleanup_session: Callable[[str | None, str | None], None] | None = None
     # Lowercased substrings that identify an auth-credential rejection in
     # THIS backend's CLI error output (harness-credential-reauth.md §3). A
     # failed turn whose combined error text contains any of them is treated

@@ -388,7 +388,9 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     model: str | None = None
     credential_id: str | None = None
-    backend: BackendKind = BackendKind.claude_code
+    # Which harness drives this agent. Defaults to the registry's default kind
+    # (`dsh`); the persisted value is the wire contract.
+    backend: BackendKind = BackendKind.dsh
     mcp_servers: list[str] = ["ask", "bg"]
     tool_allow: str = ""
     tool_deny: str = ""

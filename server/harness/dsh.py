@@ -16,6 +16,7 @@ plan's §10 is the authoritative list; `RuntimeProfile`'s derived predicates
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any
@@ -201,6 +202,73 @@ _DSH_STALE_SESSION_PATTERNS = (
 )
 
 
+def _cleanup_session(agent_id: str | None, resume_id: str | None) -> None:
+    """Drop one conversation's DSH store (plan §3.5). Best-effort by contract:
+    Octopus's session delete must not fail because DSH's files are gone, moved
+    or locked."""
+    if not agent_id:
+        return
+    from .. import dsh_home
+
+    dsh_home.purge_session_store(agent_id, resume_id)
+
+
+def _patch_signature(ctx: TurnContext) -> str:
+    """A stable name for this spawn's patch.
+
+    Everything the file's *content* depends on, hashed: two turns with the same
+    inputs share one file (and it is rewritten in place), and anything that
+    changes the persona, the memory the agent reads or the leaf scoping gets a
+    name of its own.
+    """
+    parts = [ctx.system_prompt or "", ctx.memory_dir or "", str(ctx.web_research)]
+    return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()[:16]
+
+
+def _prepare_spawn(ctx: TurnContext) -> None:
+    """Write this spawn's DSH home, memory view and patch (plan §3.5).
+
+    Runs once per spawn, before the argv is rendered: the patch path set here
+    is what `build_turn_argv` passes with `--patch`. A turn with no owning agent
+    has no home to isolate and no memory to point at, so it is refused here
+    rather than silently running against the user's own `~/.dsh`.
+    """
+    if not ctx.agent_id:
+        raise ValueError(
+            "a dsh turn needs an owning agent: its DSH home, memory view and "
+            "generated patch are all derived from the agent "
+            "(docs/plans/dsh-harness.md §3.5)"
+        )
+    from .. import dsh_home
+
+    home = dsh_home.ensure_agent_home(ctx.agent_id)
+    ctx.dsh_home = str(home)
+    ctx.dsh_patch = str(
+        dsh_home.write_patch(
+            ctx.agent_id,
+            _patch_signature(ctx),
+            persona=ctx.system_prompt,
+            memory_dir=ctx.memory_dir,
+            web_research=ctx.web_research,
+        )
+    )
+
+
+def _prepare_oneshot(ctx: OneShotContext) -> None:
+    """A one-shot needs a home — so it never touches the user's own `~/.dsh` —
+    but no patch: `headless` has no blocking approval channel to be trapped by,
+    and a parse or synthesis call needs no persona."""
+    if ctx.dsh_home:
+        return
+    from .. import dsh_home
+
+    ctx.dsh_home = str(
+        dsh_home.ensure_agent_home(ctx.agent_id)
+        if ctx.agent_id
+        else dsh_home.ensure_oneshot_home()
+    )
+
+
 async def _fork_prepare_replay(
     messages: list[Any],
     working_dir: str,
@@ -240,6 +308,9 @@ DSH = RuntimeProfile(
     # session up, delivers the prompt, and answers what DSH asks back.
     stdin_mode=StdinMode.PROTOCOL,
     new_protocol=DshAcpProtocol,
+    prepare_spawn=_prepare_spawn,
+    prepare_oneshot=_prepare_oneshot,
+    cleanup_session=_cleanup_session,
     build_turn_argv=build_turn_argv,
     new_event_parser=DshEventParser,
     build_oneshot_argv=build_oneshot_argv,

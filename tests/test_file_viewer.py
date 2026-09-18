@@ -200,7 +200,11 @@ async def session_with_files(client, tmp_path):
 
     agent = await session_manager.db.get_system_agent()
     sess = await session_manager.create_session(
-        agent["id"], name="viewer-test", working_dir=str(root)
+        agent["id"], name="viewer-test", working_dir=str(root),
+        # Pinned: the credential assertions below are claude-shaped (an
+        # `env_secret` sk-ant key), and a session that inherited whatever the
+        # registry default is would be testing a different harness.
+        backend="claude-code",
     )
     return sess.id, root
 
@@ -350,10 +354,14 @@ async def _patch_showme(monkeypatch):
     """Capture the credential argument the resolver was called with."""
     captured: dict = {}
 
-    async def _fake_resolve(text, *, harness, model, credential, working_dir, messages, session_name=None):
+    async def _fake_resolve(
+        text, *, harness, model, credential, working_dir, messages,
+        session_name=None, agent_id=None,
+    ):
         captured["credential"] = credential
         captured["model"] = model
         captured["working_dir"] = working_dir
+        captured["agent_id"] = agent_id
         from server.showme_ai import ShowMeResolution
 
         return ShowMeResolution(path="answer.md")
