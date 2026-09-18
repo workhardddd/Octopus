@@ -1,7 +1,7 @@
 # Tech Plan: DSH as a first-class harness kind
 
 Status: **implemented** (2026-09-19) — all six phases landed on
-`feature/dsh-harness` (5 commits). What the phases actually contained, where it
+`feature/dsh-harness` (8 commits). What the phases actually contained, where it
 differed from the sketch above, and what is verified:
 
 - **Phase 1-2** also carried the per-agent home and the generated patch
@@ -15,10 +15,34 @@ differed from the sketch above, and what is verified:
 - **Verified against the real CLI** (dsh 0.1.5-rc.2, this machine):
   `tests/test_dsh_profile_conformance.py` 4/4 — including the guard that the
   shipped rows still carry exactly the fields the patch restates — and
-  `tests/test_backend_dsh_real.py` 5/5 in ~33s (a real turn, a second turn on
-  the held process, a resume across a fresh process, a `headless` one-shot, and
-  a rejected key classified as an auth error). `web/e2e/dsh.spec.ts` adds a
-  mocked dialog test and a real turn through the UI (8.4s).
+  `tests/test_backend_dsh_real.py` 7/7 (a real turn, a second turn on the held
+  process, a resume across a fresh process, a `headless` one-shot, a rejected
+  key classified as an auth error, a **research web leaf**, and a **dangling
+  resume id**). `web/e2e/dsh.spec.ts` adds a mocked dialog test and a real turn
+  through the UI (8.4s).
+- **Two faults only the real CLI could find, both fixed** — they are why the
+  last two real tests exist:
+  - *The research web leaf could not boot.* Its patch disabled the sub-agent
+    **service** rows (`subagent`, `subagent-spawn-in-process`,
+    `subagent-fork-in-process`) alongside their tools, and the composed tree
+    injects those rows, so `dsh` failed to start: the ACP handshake returned a
+    bare `Internal error` with an empty stderr, which the leaf's never-raise
+    contract turned into `LeafResult(error=…)`. Deep research on DSH was
+    therefore dead end to end — and §3.9's conformance test accepted the patch
+    the whole time, because `--dump-config` composes the tree without booting
+    it. Bisecting the row list against the CLI settled it: sub-agent *tools*
+    disable cleanly, *services* do not. The leaf now turns off tools only (§10
+    row 10).
+  - *The stale-session table was a guess.* `_DSH_STALE_SESSION_PATTERNS` decides
+    whether a session whose DSH store is gone drops its resume id or fails
+    forever. A real dangling id reports `Invalid params: session is not
+    resumable: <id>`, which matched none of the four patterns written from the
+    docs — the recovery would have been a silent no-op.
+- **Verified as far as this box allows**: pytest 1118 passed / 42 skipped / 0
+  failed (Linux container; the 42 are its absent CLIs and `DEEPSEEK_API_KEY`),
+  vitest 200/200, `tsc --noEmit` clean, Playwright's `:fast` bucket 41/41, and
+  the `@llm` DSH UI turn 1/1. The other 36 `@llm` tests drive `claude`/`codex`
+  and are not runnable here for reasons that predate this branch (§8).
 - **Two open items from §3.5, both resolved rather than deferred**: the
   `sandbox-policy.mode` vs `permission.defaultPreset` question (DSH *infers* a
   preset, so the patch names it explicitly — the conformance test would fail if
@@ -425,6 +449,15 @@ running agents with a dropped persona or an unpinned posture. Given §0.1.12
 (no compatibility promise, no shipped config catalog), this test is the
 difference between "tracks the CLI" and "breaks quietly".
 
+**What it cannot catch**, learned the hard way: `--dump-config` *composes* the
+tree, it does not *boot* it. A patch that disables a row the composed tree
+injects — the leaf's sub-agent services were exactly that (§10 row 10) — prints
+a perfectly good tree and then fails at startup, with nothing on stderr. Field
+names and row shapes are what this test protects; **that a turn actually starts
+and answers is only provable by running one**, which is why
+`test_backend_dsh_real.py` runs the leaf and the dangling-resume recovery for
+real rather than asserting their argv.
+
 ## 4. Files
 
 **New — server**
@@ -447,16 +480,26 @@ difference between "tracks the CLI" and "breaks quietly".
 | `server/database.py` | Python-side defaults only (SQL defaults unchanged). |
 | `server/main.py` | Force-list the default kind in `/api/backends`. |
 | `server/config.py` | `dsh_home_dir`. |
-| `server/agent_memory.py` | Provision the `AGENTS.md` view inside the canonical memory dir. |
+| `server/harness/harness.py` | Thread `agent_id` / `dsh_home` / `dsh_patch` into the turn and one-shot contexts. |
 | `server/routers/credentials.py` | "No login driver" branch. |
-| `server/routers/{agents,sessions}.py`, `agent_manager.py`, `app_agent.py`, `applications.py`, `delegations.py` | Default kind via the shared constant. |
+| `server/routers/{agents,sessions}.py`, `server/agent_manager.py` | Default kind via the shared constant on the create paths; read-side `or "claude-code"` fallbacks and `import_session` deliberately untouched. |
+| `server/showme_ai.py`, `server/schedule_ai.py`, `server/research/{leaf,orchestrator,manager}.py`, `server/routers/files.py` | Pass `agent_id` through, so a one-shot or a leaf runs with the right DSH home. |
+
+**New — frontend**: `web/src/lib/harness.ts` (+ `harness.test.ts`) — the one
+place that knows a kind's display name, how to show an unknown kind, and which
+kind the server calls the default. `web/e2e/dsh.spec.ts` — the mocked credential
+dialog plus a real `@llm` turn.
 
 **Modified — frontend**: `web/src/api/contracts.ts` (regenerated),
 `components/HarnessPage.tsx` (third credential form),
 `components/AgentFormPage.tsx` + `components/SidebarAgents.tsx` (data-driven
-engine list, labels, defaults), `stores/sessionStore.ts` (initial availability
-+ default), `components/CredentialPicker.tsx` (unchanged filter, new backend
-value), `hooks/useWebSocket.ts` (default-kind literal).
+engine list, labels, defaults, and the note that a DSH agent's tool policy is
+inert), `components/QuestionPrompt.tsx`, `stores/sessionStore.ts` (initial
+availability + default), `hooks/useWebSocket.ts` (default-kind literal).
+`CredentialPicker.tsx` needed no change — its filter was already
+backend-agnostic. Two existing specs (`new-features`, `agent-collaboration`)
+now pin `claude-code` explicitly, because they assert claude-shaped behaviour
+and the default kind moved.
 
 **Docs**: this plan; `docs/adr/0001-dsh-unfenced-execution.md`; `CONTEXT.md`;
 `docs/architecture.md`; `README.md`; `CLAUDE.md` (structure, test table,
@@ -488,24 +531,28 @@ real-CLI gate list); `docs/backup-and-migrate.md` (new state paths);
 
 **New**
 
-- `tests/test_harness_dsh.py` — argv snapshots (incl. patch path and the
-  research overlay), event mapping, `can_*` predicates, error-pattern
-  classification, one-shot argv/stdout, fork strategy (`fork_copy is None` ⇒
-  replay).
-- `tests/test_dsh_acp.py` — the client itself against a scripted fake ACP
-  process: required `mcpServers`, resume re-sending MCP, `session/cancel`,
-  answering `session/request_permission`, JSON-RPC error → `error` event,
-  response/settlement ordering, malformed-line tolerance.
+- `tests/test_harness_dsh.py` — 15 cases: argv snapshots (incl. patch path and
+  the research overlay), home/credential env, the refusal without a home or a
+  patch, event mapping, `can_*` predicates, error-pattern classification,
+  one-shot argv/stdout, fork strategy (`fork_copy is None` ⇒ replay), and the
+  ACP client itself against a scripted fake process — required `mcpServers`,
+  resume re-sending MCP, `session/cancel`, answering
+  `session/request_permission`, a JSON-RPC error → `error` event,
+  response/settlement ordering, `messageId` chunk coalescing, malformed-line
+  tolerance.
 - `tests/test_dsh_home.py` — home layout, shared-profile symlink, patch
   rendering + purge, `AGENTS.md` provisioning, credential-by-env, session-store
   purge on delete (and that it never fails the delete).
 - `tests/test_dsh_profile_conformance.py` — the §3.9 `--dump-config` assertions
   (gated on `dsh` on PATH; a missing row is a **failure**, never a skip).
-- `tests/test_backend_dsh_real.py` — a real ACP turn (text + a tool call +
-  cancel), a real `session/resume` across a fresh process, and a real one-shot;
-  gated on `dsh` on PATH **and** a usable DeepSeek credential, with the
-  existing probe-timeout-is-an-error rule (`tests/cli_gate.py`).
-- `tests/fake_dsh_acp.py` — the scripted fake CLI fixture.
+- `tests/test_backend_dsh_real.py` — 7 real turns: text + settle, the held
+  process serving the next turn, `session/resume` in a fresh process, a
+  `headless` one-shot, a rejected key classified as an auth error, a **web leaf
+  running scoped**, and a **dangling resume id classified as stale** (the last
+  two are the regression tests for the faults in the status header); gated on
+  `dsh` on PATH **and** a usable DeepSeek credential, with the existing
+  probe-timeout-is-an-error rule (`tests/cli_gate.py`).
+- `tests/_fixtures/fake_dsh_acp.py` — the scripted fake CLI fixture.
 - Frontend: `HarnessPage`/`AgentFormPage` cases for the DSH credential form and
   the data-driven engine list; `web/e2e/dsh.spec.ts` (an `@llm` spec mirroring
   `codex.spec.ts`: pick the DSH engine, send a prompt, assert the reply),
@@ -565,7 +612,17 @@ and the real-CLI Claude/Codex suites.
 - No new Python dependency; all DSH coupling lives in `server/harness/dsh*.py`
   and `server/dsh_home.py`.
 - pytest / vitest / `tsc --noEmit` / Playwright all green, with CLAUDE.md's
-  counts and real-CLI gate list re-derived.
+  counts and real-CLI gate list re-derived. How far that reached on the dev
+  machine (Windows, `dsh` installed and keyed): pytest is authoritative in a
+  Linux container — 1118 passed / 42 skipped / 0 failed — vitest 200/200,
+  `tsc --noEmit` clean, Playwright's `:fast` bucket 41/41, and the DSH `@llm`
+  turn green. The remaining 36 `@llm` tests drive `claude`/`codex` and are not
+  runnable here: three modules need POSIX process groups (`os.getpgid`,
+  `signal.SIGKILL`, `start_new_session`) and `playwright.config.ts` starts
+  `.venv/bin/uvicorn`, and separately `claude` streaming collects zero events on
+  Windows — reproduced identically from an untouched worktree of the parent
+  commit, so it is not this branch's. Verifying that bucket needs a POSIX box
+  with both CLIs signed in.
 
 ## 9. Decisions taken (and where they live)
 
@@ -593,7 +650,7 @@ and the real-CLI Claude/Codex suites.
 | 7. `--agents` sub-agents | inert (not rendered) | no DSH analogue; the profile simply does not render them |
 | 8. handoff/pull | unsupported (`can_export`/`can_import` False) | Claude-JSONL product; DSH's own format is Zstd-framed and cwd-bound |
 | 9. Sandbox | none (unfenced) | ADR 0001 |
-| 10. Web leaf | works, via a second restricted spawn profile | tool policy is not per-turn |
+| 10. Web leaf | works, via a second restricted spawn profile | tool policy is not per-turn; the patch may only disable tool rows — disabling an injected **service** row keeps `dsh` from booting at all, with a bare `Internal error` and empty stderr |
 
 ## 11. What this defers
 
