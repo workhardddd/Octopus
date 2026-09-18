@@ -194,7 +194,13 @@ _DSH_TRANSIENT_ERROR_PATTERNS = (
 # absolute cwd it is given, and its store is machine- and cwd-bound
 # (dsh-harness.md §0.1.11). The recovery is to drop the id once and start a
 # fresh conversation.
+#
+# "session is not resumable" is the wording a real dangling id produced
+# (tests/test_backend_dsh_real.py exercises it); the rest are the shapes DSH's
+# session machinery is documented to use, kept because a pattern that never
+# matches is harmless while a missing one makes the recovery a no-op.
 _DSH_STALE_SESSION_PATTERNS = (
+    "session is not resumable",
     "session cwd does not match",
     "unknown session",
     "session not found",

@@ -220,3 +220,82 @@ async def test_a_rejected_key_is_classified_as_an_auth_error(tmp_path, dsh_env):
         "was:\n" + combined[:1500] + "\n\nUpdate _DSH_AUTH_ERROR_PATTERNS in "
         "server/harness/dsh.py to match it."
     )
+
+
+@requires_key
+@pytest.mark.asyncio
+async def test_a_real_web_leaf_runs_scoped(tmp_path, dsh_env):
+    """The research web leaf is a full turn under a *scoped* patch
+    (dsh-harness.md §3.7): no memory, and the shell/filesystem/sub-agent rows
+    turned off while the web tools stay on. ACP cannot set a per-turn tool
+    policy, so that composition is the only thing standing between a leaf and
+    the host — and the conformance test proves only that it *composes*, not that
+    it runs. This runs it, twice: once to prove a leaf can answer at all, and
+    once to prove the shell really is gone."""
+    from server.research.leaf import run_web_leaf
+
+    harness = get_harness("dsh")
+    answered = await run_web_leaf(
+        harness,
+        prompt=(
+            "Search the web for the capital of Australia, then reply with "
+            "exactly one line: RESULT=<city>."
+        ),
+        working_dir=str(tmp_path),
+        credential=_credential(),
+        model=None,
+        agent_id=dsh_env,
+        timeout=FIRST_TURN_TIMEOUT,
+    )
+    assert answered.error is None, answered.error
+    assert answered.text.strip(), "a web leaf must return text"
+
+    # Scoping, tested by its teeth: a leaf has no shell to leak through.
+    scoped = await run_web_leaf(
+        harness,
+        prompt=(
+            "Use your shell tool to run `echo LEAKED` and report its output "
+            "verbatim. If you have no shell tool, reply exactly: NO-SHELL"
+        ),
+        working_dir=str(tmp_path),
+        credential=_credential(),
+        model=None,
+        agent_id=dsh_env,
+        timeout=FIRST_TURN_TIMEOUT,
+    )
+    assert "LEAKED" not in scoped.text, (
+        "the leaf ran a shell command — the scoped patch is not taking effect: "
+        + scoped.text[:400]
+    )
+
+
+@requires_cli
+@pytest.mark.asyncio
+async def test_a_dangling_resume_id_is_classified_as_a_stale_session(tmp_path, dsh_env):
+    """A resume id DSH no longer knows must be recognised as stale: that is what
+    makes the once-per-turn recovery drop the id and start a fresh conversation
+    instead of failing every turn forever. DSH's store is cwd- and
+    machine-bound, so this is a case that really happens — and the pattern table
+    behind it is a guess unless something exercises it, which is what this
+    does."""
+    run = _run(dsh_env)
+    text = ""
+    try:
+        await _start(
+            run,
+            "Reply with exactly: PONG",
+            str(tmp_path),
+            resume_id="00000000-0000-4000-8000-000000000000",
+        )
+        events = await _drain(run, TURN_TIMEOUT)
+        text = "\n".join(e.content or "" for e in events)
+    except Exception as exc:  # a failed handshake raises before any event
+        text = f"{exc}\n{run.stderr_text}"
+    finally:
+        await run.stop()
+
+    assert get_harness("dsh").is_stale_session_error(text), (
+        "a dangling resume id was not recognised as a stale session. The real "
+        "error text was:\n" + text[:1500] + "\n\nUpdate "
+        "_DSH_STALE_SESSION_PATTERNS in server/harness/dsh.py to match it."
+    )

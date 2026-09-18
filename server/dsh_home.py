@@ -67,6 +67,15 @@ _SHIPPED_PRESETS: tuple[tuple[str, str, str], ...] = (
 #: Rows a deep-research web leaf turns off: it needs to search and read the web
 #: and nothing else. ACP cannot set a per-turn tool policy, so scoping is a
 #: spawn-level patch (docs/plans/dsh-harness.md §3.7).
+#:
+#: The sub-agent **tools** are here and the sub-agent **service** rows
+#: (`subagent`, `subagent-spawn-in-process`, `subagent-fork-in-process`) are
+#: deliberately not: the composed tree injects those, so disabling them fails
+#: the boot — the ACP handshake comes back with a bare "Internal error" and the
+#: CLI writes nothing to stderr, which is exactly what
+#: `tests/test_backend_dsh_real.py::test_a_real_web_leaf_runs_scoped` caught.
+#: Without the tools the model has nothing to fan out with, which is what the
+#: leaf actually needs.
 _LEAF_DISABLED_ROWS = (
     "tool-bash",
     "tool-pwsh",
@@ -75,11 +84,8 @@ _LEAF_DISABLED_ROWS = (
     "tool-fs-search",
     "tool-subagent",
     "tool-subagent-control",
-    "tool-subagent-fork",
     "tool-subagent-list-agents",
-    "subagent",
-    "subagent-spawn-in-process",
-    "subagent-fork-in-process",
+    "tool-subagent-fork",
     "tool-workflow",
     "tool-goal",
     "tool-ralph",
