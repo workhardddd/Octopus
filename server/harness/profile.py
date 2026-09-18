@@ -80,6 +80,13 @@ class TurnContext:
     # Sub-agent definitions to register for this turn (native-subagents.md §6).
     # A profile without a surface for them simply doesn't render them.
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    # Per-agent DSH home and the generated patch file for this turn
+    # (dsh-harness.md §3.5). Both None on every other harness kind, and the
+    # DSH profile refuses to render a turn without them: a DSH process with no
+    # explicit DSH_HOME writes its sessions into the user's own `~/.dsh`,
+    # which is exactly what the per-agent home exists to prevent.
+    dsh_home: str | None = None
+    dsh_patch: str | None = None
 
 
 @dataclass
@@ -90,6 +97,9 @@ class OneShotContext:
     model: str | None = None
     credential: HarnessCredential | None = None
     working_dir: str | None = None
+    # DSH's per-agent home (dsh-harness.md §3.5). Required for a DSH one-shot:
+    # without it the process would read and write the user's own `~/.dsh`.
+    dsh_home: str | None = None
 
 
 @dataclass
@@ -110,6 +120,90 @@ class EventParser(ABC):
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         """Map one parsed stdout JSON object to zero+ events, flagging
         end-of-stream when the turn's terminal event (result) lands."""
+
+    def flush(self) -> ParseOutput:
+        """Whatever this parser is still holding, as a final parse result.
+
+        The engine asks for this just before a turn's terminal event, so a
+        parser that coalesces pieces into one logical event (ACP delivers one
+        assistant message as several `messageId`-tagged chunks) can emit it
+        *before* the result rather than after the stream has closed. Parsers
+        that emit as they parse have nothing to flush.
+        """
+        return ParseOutput()
+
+
+class FrameKind(str, Enum):
+    """What one stdout frame is, for a protocol that multiplexes kinds.
+
+    A `PROTOCOL` run's stdout carries three different things — events the
+    model runtime is reporting, responses to requests we sent, and requests
+    the runtime is making of us — and they must be routed before anything
+    tries to interpret them as events.
+    """
+
+    EVENT = "event"
+    RESPONSE = "response"
+    REQUEST = "request"
+
+
+class TerminalProtocol(ABC):
+    """How a harness's stdio is driven beyond "one event per line".
+
+    `HarnessRun` owns the pipe, the writes and the response correlation; the
+    protocol owns the *conversation*: what to send before the first turn, how
+    to deliver a turn, which frames are events, and what to answer when the
+    runtime asks us something. Only a `StdinMode.PROTOCOL` profile supplies
+    one — the two frame-on-stdin modes keep rendering their own raw frames and
+    treat every line as an event.
+
+    Methods take the `HarnessRun` rather than the protocol holding it, because
+    the run is rebuilt per turn while the protocol is a profile-level value
+    (the same shape `EventParser`/`LoginDriver` already have). `Any` avoids a
+    circular import: `run.py` imports this module.
+    """
+
+    async def handshake(self, run: Any, ctx: TurnContext) -> str | None:
+        """Set the process up before the first turn is delivered (create or
+        resume the engine-side conversation, apply per-session options).
+        Returns the engine-side conversation id to persist, or None."""
+        return None
+
+    async def send_turn(self, run: Any, text: str) -> str | None:
+        """Deliver one user turn. Returns a frame id the caller may match
+        against an echo, or None."""
+        raise NotImplementedError
+
+    def classify(self, obj: dict[str, Any]) -> FrameKind:
+        """What one parsed stdout object is."""
+        return FrameKind.EVENT
+
+    async def on_response(
+        self,
+        run: Any,
+        request_id: Any,
+        result: Any,
+        error: Any,
+    ) -> ParseOutput:
+        """A response to a request this protocol sent. Returns the events it
+        implies, including whether the turn (and so the stream) ends here."""
+        return ParseOutput()
+
+    async def on_request(
+        self,
+        run: Any,
+        request_id: Any,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The complete response frame to write back for a runtime→client
+        request. The protocol owns the error shape too, so a method it does
+        not implement answers in its own protocol's way."""
+        raise NotImplementedError
+
+    async def cancel(self, run: Any) -> None:
+        """Turn-owned cancellation. Default: stop the process."""
+        await run.stop()
 
 
 class TranscriptCodec(Protocol):
@@ -145,6 +239,14 @@ class StdinMode(str, Enum):
     #: stdin, which therefore stays open for the life of the process.
     STREAM_JSON = "stream_json"
 
+    #: The pipe carries a request/response conversation, not raw prompts: the
+    #: run's `TerminalProtocol` sets the process up at spawn, delivers each
+    #: turn, and answers anything the CLI asks back. stdout may therefore
+    #: carry responses and server→client requests alongside events, which is
+    #: why `HarnessRun` routes frames instead of parsing every line as one.
+    #: (DSH over ACP — docs/plans/dsh-harness.md §3.1.)
+    PROTOCOL = "protocol"
+
 
 @dataclass(frozen=True)
 class RuntimeProfile:
@@ -166,6 +268,16 @@ class RuntimeProfile:
     new_event_parser: Callable[[], EventParser]
     build_oneshot_argv: Callable[[OneShotContext], tuple[list[str], dict[str, Any]]]
     parse_oneshot_stdout: Callable[[str], str]
+    # The conversation driver for `StdinMode.PROTOCOL` (below the required
+    # renderers because a dataclass may not put a default before them). None
+    # for the two frame-on-stdin modes, whose frames the engine renders itself.
+    #
+    # A *factory*, like `new_event_parser` and for the same reason: a profile
+    # is one frozen value shared by every run of its kind, while a protocol
+    # holds per-run state (the turn in flight, the request it awaits). One
+    # instance per run is what keeps two concurrent runs of the same harness
+    # from answering each other's frames.
+    new_protocol: Callable[[], TerminalProtocol] | None = None
     # Lowercased substrings that identify an auth-credential rejection in
     # THIS backend's CLI error output (harness-credential-reauth.md §3). A
     # failed turn whose combined error text contains any of them is treated

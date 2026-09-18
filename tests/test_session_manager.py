@@ -1448,11 +1448,15 @@ class _FakeBackend(FakeRunBase):
     stderr_text, so _run_backend's auth-expiry classifier can be exercised
     without a real CLI subprocess."""
 
-    def __init__(self, events, stderr_text="", reusable=False):
+    def __init__(self, events, stderr_text="", reusable=False, can_steer=None):
         self._events = list(events)
         self.stderr_text = stderr_text
         # Opt-in: whether this stand-in claims its process survives the turn.
         self.reusable = reusable
+        # Steering is a narrower capability than process reuse. A stand-in
+        # that claims reusability is claude-shaped by default (it answers
+        # send_user_frame), so it steers unless a test says otherwise.
+        self.can_steer = reusable if can_steer is None else can_steer
         self.sent_turns: list[str] = []
 
     async def start(self, *args, **kwargs):

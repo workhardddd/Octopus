@@ -2235,10 +2235,12 @@ class SessionManager:
                     )
 
                 # The steering window is open from here until `result`
-                # (inline-steering.md §8). Only a backend that takes input on
-                # stdin can be steered; everything else keeps queueing.
+                # (inline-steering.md §8). Only a backend with a raw mid-turn
+                # input channel can be steered; everything else — including a
+                # protocol backend that happily reuses its process — keeps
+                # queueing.
                 steer_writer: asyncio.Task[int] | None = None
-                if backend.reusable:
+                if backend.can_steer:
                     async with session._steer_lock:
                         session._steer_open = True
                         if session._steer_queue:

@@ -15,6 +15,8 @@ class SessionStatus(str, Enum):
 class BackendKind(str, Enum):
     claude_code = "claude-code"
     codex = "codex"
+    #: The DeepSeek Harness (docs/plans/dsh-harness.md).
+    dsh = "dsh"
 
 
 class CreateSessionRequest(BaseModel):
