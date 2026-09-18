@@ -107,3 +107,29 @@ def codex_cli_works() -> bool:
         timeout=90,
         cwd=tempfile.gettempdir(),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def dsh_cli_present() -> bool:
+    """True if the `dsh` binary resolves (honoring the harness's PATH
+    fallback). The shallow half of the DSH gate: enough for tests that only
+    need the CLI to exist (a rejected credential, for instance)."""
+    return _resolve_cli("dsh") is not None
+
+
+@functools.lru_cache(maxsize=1)
+def dsh_cli_works() -> bool:
+    """True if `dsh` is installed AND has a usable credential.
+
+    DSH authenticates with an API key rather than a login flow, so the key's
+    presence in the environment is what makes a turn possible. The probe is
+    deliberately shallow — `--version`, not a real turn — because a real turn
+    would need a `DSH_HOME`, and initializing one just to answer "is this CLI
+    usable" is slow, needs the network, and (against the default home) would
+    write a session into whatever the person running the tests uses DSH for.
+    Tests that need a turn check the key and then prove it by running one.
+    """
+    exe = _resolve_cli("dsh")
+    if exe is None or not os.environ.get("DEEPSEEK_API_KEY"):
+        return False
+    return _probe([exe, "--version"], timeout=60)
