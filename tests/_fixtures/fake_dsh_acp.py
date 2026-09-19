@@ -17,6 +17,8 @@ Modes (argv[2]):
   slow            : emit one update and wait; the turn settles only when the
                     client sends `session/cancel`.
   error           : settle the prompt with a JSON-RPC error.
+  resume-error    : answer `session/resume` with a JSON-RPC error (the
+                    catch-all a store DSH cannot read produces).
 """
 
 import json
@@ -81,6 +83,15 @@ def main() -> int:
             session_id = "dsh-sess-1"
             write(result(request_id, {"sessionId": session_id}))
         elif method == "session/resume":
+            if mode == "resume-error":
+                write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32603, "message": "Internal error"},
+                    }
+                )
+                continue
             session_id = params.get("sessionId") or "dsh-sess-1"
             write(result(request_id, {"sessionId": session_id}))
         elif method == "session/set_config_option":

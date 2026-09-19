@@ -2369,10 +2369,14 @@ async def test_a_message_with_attachments_is_never_steered():
 
 
 async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypatch):
-    """A turn that dies before the steering window opens must surface *its*
-    failure. Cleanup used to read an unbound `steer_writer` and replace the real
-    error with `UnboundLocalError` — so the user saw that instead of "the CLI
-    could not be started", and the cause was missing from the logs too."""
+    """A turn whose process never starts must still *report*, through the same
+    disposition as one that dies mid-stream.
+
+    It used to escape `_run_backend` entirely and land in `send_message`'s
+    catch-all, which writes a bubble and recovers nothing — so a start failure
+    was never classified (no auth re-flag, no stale-id drop, no retry), and a
+    session whose engine could not resume stayed bricked.
+    """
     session = await _new(manager, "StartFails")
 
     class _ExplodingStart(FakeRunBase):
@@ -2382,6 +2386,7 @@ async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypat
         def stream(self):
             async def _gen():
                 yield  # pragma: no cover — never reached
+
             return _gen()
 
         async def stop(self):
@@ -2389,9 +2394,61 @@ async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypat
 
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _ExplodingStart())
 
-    with pytest.raises(RuntimeError, match="could not be started"):
-        async for _ in manager._run_backend(session, "go"):
-            pass
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "turn_no_result"
+    # The engine's own words are carried, so the bubble is actionable.
+    assert "could not be started" in events[0]["message"]
+
+
+async def test_a_resume_the_engine_refuses_is_recovered_not_reported(
+    manager, monkeypatch
+):
+    """A resume id the engine will not serve is *classified* like any other
+    failure — the id is dropped, the history replayed and the turn retried —
+    rather than escaping as a bare error.
+
+    Observed for real: a DSH turn killed at its 1800s cap left a session store
+    the engine then answered with a catch-all "Internal error", and every later
+    turn re-tried the same dead id and failed identically.
+    """
+    from server.harness import HarnessCredential, HarnessEvent
+    from server.harness.run import ProtocolRequestError
+
+    session = await _new(manager, "DeadResume", backend="dsh")
+    session.claude_session_id = "dead-resume-id"
+
+    class _RefusesResume(_SeqBackend):
+        async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+            self.started_with = prompt
+            self.started_resume = resume_id
+            if resume_id:
+                raise ProtocolRequestError(
+                    f"session is not resumable: {resume_id} — Internal error"
+                )
+
+    attempt1 = _RefusesResume(events=[])
+    attempt2 = _SeqBackend(
+        events=[
+            HarnessEvent(type="text", content="recovered"),
+            HarnessEvent(type="result", session_id="fresh", is_error=False),
+        ]
+    )
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+
+    async def _cred(*args, **kwargs):
+        return HarnessCredential(backend="dsh", auth_type="api_key", secret="sk-test")
+
+    monkeypatch.setattr(manager, "_resolve_credential", _cred)
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert attempt1.started_resume == "dead-resume-id"
+    assert attempt2.started_resume is None, "the dead id was retried"
+    assert any(e.get("code") == "stale_session" for e in events)
+    assert any(e.get("type") == "assistant_text" for e in events)
+    assert not any(e.get("code") == "turn_no_result" for e in events)
 
 
 async def test_a_turn_that_ends_with_no_result_says_so(manager, monkeypatch):

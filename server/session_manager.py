@@ -2224,6 +2224,10 @@ class SessionManager:
             # Terminal-error signal for post-turn auth-expiry classification.
             saw_error_event = False
             error_event_text = ""
+            # Set when the turn could not even start (a CLI that will not spawn,
+            # a resume the engine refuses): there is nothing to stream, so the
+            # attempt goes straight to the failure disposition.
+            start_failed = False
             # Streaming-text coalescing (inline-steering.md §4 S1). The CLI
             # emits one delta per token; forwarding each as its own WS frame
             # would be a frame per token and a React render per token. We
@@ -2246,17 +2250,37 @@ class SessionManager:
             steer_writer: asyncio.Task[int] | None = None
 
             try:
-                if reused is not None:
-                    # The process already holds this conversation, so there is
-                    # no prompt to re-render and no transcript to resume: just
-                    # hand it the next message.
-                    await backend.send_turn(current_prompt)
-                else:
-                    await backend.start(
-                        current_prompt,
-                        session.working_dir,
-                        session.claude_session_id,
-                        credential=credential,
+                # A turn that never starts must take the *same* disposition as
+                # one that dies mid-stream: the classification below is what
+                # knows how to re-flag an auth failure, drop a resume id the
+                # engine refuses, retry a transient blip, or report honestly.
+                # Letting the exception escape instead sent it straight to
+                # `send_message`'s catch-all, which only writes an error bubble —
+                # so a handshake failure had no recovery at all and a session
+                # whose engine could not resume stayed bricked, retrying the
+                # same dead id every turn (found in a trial: two identical
+                # "Internal error" turns in a row).
+                try:
+                    if reused is not None:
+                        # The process already holds this conversation, so there
+                        # is no prompt to re-render and no transcript to resume:
+                        # just hand it the next message.
+                        await backend.send_turn(current_prompt)
+                    else:
+                        await backend.start(
+                            current_prompt,
+                            session.working_dir,
+                            session.claude_session_id,
+                            credential=credential,
+                        )
+                except Exception as exc:  # noqa: BLE001 — classified below
+                    start_failed = True
+                    saw_error_event = True
+                    error_event_text = f"{exc.__class__.__name__}: {exc}"
+                    logger.warning(
+                        "Session %s: the turn failed to start — %s",
+                        session.id,
+                        error_event_text,
                     )
 
                 # The steering window is open from here until `result`
@@ -2264,7 +2288,7 @@ class SessionManager:
                 # input channel can be steered; everything else — including a
                 # protocol backend that happily reuses its process — keeps
                 # queueing.
-                if backend.can_steer:
+                if backend.can_steer and not start_failed:
                     async with session._steer_lock:
                         session._steer_open = True
                         if session._steer_queue:
@@ -2274,7 +2298,10 @@ class SessionManager:
                         name=f"steer-writer-{session.id}",
                     )
 
-                async for event in backend.stream():
+                # Nothing to stream when the start itself failed: go straight to
+                # the disposition, which classifies what came back.
+                events = _no_events() if start_failed else backend.stream()
+                async for event in events:
                     watchdog_state["last"] = time.monotonic()
 
                     # Coalesce token deltas; flush on a timer.
@@ -3525,12 +3552,17 @@ class SessionManager:
             "reporting why. Check the credential attached to this agent, then "
             "try again."
         )
-        if detail.strip():
+        detail = detail.strip()
+        if detail:
+            # We do have *something* to say — a start failure's exception, the
+            # engine's stderr — and the user is otherwise left guessing. A
+            # bounded amount reaches the bubble; the whole tail goes to the log.
+            human += f"\n\nEngine error: {detail[:600]}"
             logger.warning(
                 "Session %s: %s ended a turn with no result — %s",
                 session.id,
                 backend,
-                detail.strip()[:2000],
+                detail[:2000],
             )
         seq = await self._persist_message(
             session,
@@ -4064,6 +4096,18 @@ class SessionManager:
             return False
         pending.future.set_result(False)
         return True
+
+
+async def _no_events() -> AsyncIterator[dict[str, Any]]:
+    """An empty event source, for an attempt whose process never started.
+
+    The run loop still iterates so the attempt reaches the failure
+    disposition — that is what classifies a start failure (auth / stale id /
+    transient) and, failing all of those, reports it. Skipping the loop is how
+    the error used to escape unclassified.
+    """
+    return
+    yield {}  # pragma: no cover — unreachable; makes this a generator
 
 
 def _guess_mime(filename: str) -> str:

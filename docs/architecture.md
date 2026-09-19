@@ -497,11 +497,14 @@ provisioned on agent create, kept on archive, removed on hard delete.
   itself; (2) transient backend error (5xx/overloaded/dropped stream) →
   bounded exponential retry (max 2, resumes from captured session id when
   output was already streamed); (3) everything else (quota/credit/billing) →
-  surface as-is. A turn that ends with **no result and no recognisable error**
-  is reported too rather than just stopping — an engine that dies quietly (a
-  rejected key, a crash, a protocol mismatch) used to leave the status flipped
-  back to idle with nothing persisted and nothing broadcast. An engine that
-  cannot fall back to a CLI login says so *before* it spawns
+  surface as-is. A failure to **start** the turn — a CLI that will not spawn, a
+  resume the engine refuses — takes the same disposition as one that dies
+  mid-stream; it used to escape the run loop entirely, which is how a session
+  whose engine could not resume ended up failing identically on every later turn
+  with nothing but the engine's own words on screen. A turn that ends with **no
+  result and no recognisable error** is reported too rather than just stopping
+  (the report carries the engine's error text, not only a summary). An engine
+  that cannot fall back to a CLI login says so *before* it spawns
   (`RuntimeProfile.credential_required`: DSH, whose ACP is key-only).
   Classifiers are backend-declared pattern sets in
   `RuntimeProfile`. Designs: [`plans/harness-credential-reauth.md`](plans/harness-credential-reauth.md)

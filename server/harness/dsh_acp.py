@@ -35,6 +35,7 @@ import json
 import logging
 from typing import Any
 
+from .. import dsh_home
 from .events import HarnessEvent
 from .profile import (
     EventParser,
@@ -44,7 +45,7 @@ from .profile import (
     TerminalProtocol,
     TurnContext,
 )
-from .. import dsh_home
+from .run import ProtocolRequestError
 
 logger = logging.getLogger(__name__)
 
@@ -278,16 +279,32 @@ class DshAcpProtocol(TerminalProtocol):
         if ctx.resume_id:
             # The MCP declarations must be re-sent here: a resume without them
             # composes a session with no MCP servers at all.
-            result = await run.request(
-                self._request(
-                    "session/resume",
-                    {
-                        "sessionId": ctx.resume_id,
-                        "cwd": ctx.working_dir,
-                        "mcpServers": mcp_servers,
-                    },
+            try:
+                result = await run.request(
+                    self._request(
+                        "session/resume",
+                        {
+                            "sessionId": ctx.resume_id,
+                            "cwd": ctx.working_dir,
+                            "mcpServers": mcp_servers,
+                        },
+                    )
                 )
-            )
+            except ProtocolRequestError as exc:
+                # A resume this engine cannot serve is a *stale session*, and it
+                # has to be recognised as one whatever DSH calls it. Its answer
+                # is often a catch-all — a store its own abrupt kill left
+                # unreadable comes back as a bare "Internal error" — and the
+                # turn-level recovery only fires on a message it can classify,
+                # so an unclassified failure here bricked the session: every
+                # later turn re-tried the same dead id and failed identically
+                # (found in a trial, twice in a row). Say what it is, in the
+                # wording the classifier already matches (verified against the
+                # real CLI's own dangling-id error), and let Octopus drop the id
+                # and start a fresh engine-side conversation.
+                raise ProtocolRequestError(
+                    f"session is not resumable: {ctx.resume_id} — {exc}"
+                ) from exc
         else:
             result = await run.request(
                 self._request(
