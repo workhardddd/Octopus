@@ -44,6 +44,7 @@ from .profile import (
     TerminalProtocol,
     TurnContext,
 )
+from .. import dsh_home
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +54,12 @@ PROTOCOL_VERSION = 1
 #: JSON-RPC's "method not found".
 _METHOD_NOT_FOUND = -32601
 
-#: The provider route a bare model id belongs to. DSH's first-party route;
-#: any other route is a `provider/model` pair (dsh-harness.md §3.8).
-DEFAULT_PROVIDER = "deepseek-official"
+#: The provider route a bare model id belongs to, and the model Octopus selects
+#: when the agent names none. Both live with the settings that declare them —
+#: see `server/dsh_home.py` for why the model has to be selected over ACP at all
+#: (DSH's shipped ACP patch pins a different, text-only one).
+DEFAULT_PROVIDER = dsh_home.DEFAULT_PROVIDER
+DEFAULT_MODEL = dsh_home.DEFAULT_MODEL
 
 #: Tool statuses that end a call (ACP `ToolCallStatus`).
 _TERMINAL_TOOL_STATUS = {"completed", "failed"}
@@ -292,17 +296,19 @@ class DshAcpProtocol(TerminalProtocol):
                 )
             )
         self._session_id = (result or {}).get("sessionId") or ctx.resume_id
-        if ctx.model:
-            await run.request(
-                self._request(
-                    "session/set_config_option",
-                    {
-                        "sessionId": self._session_id,
-                        "configId": "model",
-                        "value": model_option_value(ctx.model),
-                    },
-                )
+        # Always select the route, even when the agent names no model: DSH's
+        # shipped ACP config pins one no one chose (see DEFAULT_MODEL), and the
+        # selection is what decides whether the bridge accepts image content.
+        await run.request(
+            self._request(
+                "session/set_config_option",
+                {
+                    "sessionId": self._session_id,
+                    "configId": "model",
+                    "value": model_option_value(ctx.model or DEFAULT_MODEL),
+                },
             )
+        )
         return self._session_id
 
     async def send_turn(self, run, text: str) -> str | None:

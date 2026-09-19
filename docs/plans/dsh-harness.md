@@ -341,6 +341,29 @@ usage on the same box. Two provisioning consequences, both handled here:
   (and at Octopus boot for existing agents), not lazily inside a turn, and a
   failure is surfaced as its own error rather than as a turn timeout.
 
+**A home also carries `settings.yaml`** — the model route and the catalog that
+decides what it can do. DSH's own ACP application ships a patch pinning
+`deepseek-v4-flash`, and `dsh-acp` never consults `agent-default-model`, so a
+home with no settings ran every turn on a model nobody chose. Worse, that model
+declares no image modality and the ACP bridge refuses image content for a model
+that does not ("model … does not declare image input"). So each home gets a
+generated `settings.yaml` that:
+
+- selects `deepseek-flash` (`DEFAULT_MODEL`, sent as a per-session
+  `session/set_config_option` — the client is the only party `dsh-acp` listens
+  to for the route), and
+- declares the provider catalog with `deepseek-flash: [text, image]`. The
+  provider plugin's `llm-deepseek.models` **replaces** its built-in catalog
+  (`z.array(...).default(...)`), so the list restates every route DSH ships —
+  dropping one would leave the shipped ACP route pointing at a model that no
+  longer exists.
+
+Both files are generated per spawn and never hand-edited. Verified by
+`tests/test_dsh_home.py` (the rendered catalog + route) and
+`tests/test_harness_dsh.py` (the option is sent on every turn, agent model or
+default), plus a real turn: `dsh --dump-config` with the home shows the route,
+and a live turn on a real credential completes with `is_error: false`.
+
 **The patch is a pure function of the turn.** `<agent_home>/patches/<spawn
 signature>.yml` is regenerated per spawn from the same inputs
 `spawn_signature` already hashes (persona, model, MCP set, connectors, memory
@@ -663,6 +686,8 @@ and the real-CLI Claude/Codex suites.
 | 9. Sandbox | none (unfenced) | ADR 0001 |
 | 10. Web leaf | works, via a second restricted spawn profile | tool policy is not per-turn; the patch may only disable tool rows — disabling an injected **service** row keeps `dsh` from booting at all, with a bare `Internal error` and empty stderr |
 | 11. Credential | **required** — a turn with none is refused up front | ACP is key-authenticated: there is no CLI login to fall back to the way `claude`/`codex` have. Without the check, DSH starts, accepts the prompt and ends the turn with **no answer and no error** — found in a real trial, and made visible in the same change (`RuntimeProfile.credential_required`) |
+| 12. Model route | **Octopus selects it**: `deepseek-flash`, declared `[text, image]` in each home's generated `settings.yaml` | DSH's shipped ACP patch pins `deepseek-v4-flash` and `dsh-acp` ignores `agent-default-model`, so the route is the client's to set. The catalog entry is what opens the ACP image gate; an agent that names a model still wins (§3.5) |
+| 13. Image content | **not sent** — an attachment reaches the model as a path in the prompt text | Octopus's attachment contract is `<attachments>` + absolute paths (`session_manager`), and `server/harness/` has no image-content path at all, so declaring the modality removes DSH's refusal but nothing delivers pixels yet |
 
 ## 11. What this defers
 

@@ -31,6 +31,46 @@ def _memory_dir() -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# Settings (the model route + its modalities)
+# --------------------------------------------------------------------------- #
+
+
+def test_settings_declare_the_model_route_octopus_selects():
+    """The home says which model DSH should run, and that it takes images.
+
+    Both halves are load-bearing: DSH's own ACP profile pins a *different*
+    model, and the ACP bridge refuses image content unless the resolved catalog
+    entry declares the modality — which is only true of what this file says.
+    """
+    home = dsh_home.ensure_agent_home(AGENT)
+    text = (home / "settings.yaml").read_text(encoding="utf-8")
+
+    assert f"model: {dsh_home.DEFAULT_MODEL}" in text
+    assert f"provider: {dsh_home.DEFAULT_PROVIDER}" in text
+    assert "id: deepseek-flash" in text
+    # `deepseek-flash` is the one Octopus selects, so its modalities are the
+    # ones that matter; the shipped v4 entries stay listed because the provider
+    # plugin's model list REPLACES its built-in catalog.
+    flash = text.split("- id: deepseek-flash", 1)[1].split("- id:", 1)[0]
+    assert "inputModalities: [text, image]" in flash
+    for shipped in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        assert f"id: {shipped}" in text
+
+
+def test_settings_land_in_both_kinds_of_home_and_are_stable():
+    """The one-shot home needs them too (it has no agent to inherit from), and
+    a rewrite must be a no-op so a running DSH never sees the file churn."""
+    agent_home = dsh_home.ensure_agent_home(AGENT)
+    one_shot = dsh_home.ensure_oneshot_home()
+    for home in (agent_home, one_shot):
+        settings_file = home / "settings.yaml"
+        assert settings_file.is_file()
+        first = settings_file.stat().st_mtime_ns
+        dsh_home.write_settings(home)
+        assert settings_file.stat().st_mtime_ns == first
+
+
+# --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
 

@@ -280,8 +280,11 @@ async def test_dsh_acp_resume_resends_mcp_servers(tmp_path, monkeypatch):
     assert resumed["params"]["sessionId"] == "dsh-sess-old"
     assert resumed["params"]["mcpServers"] == []
     assert not any(f.get("method") == "session/new" for f in sent)
-    # No model on this run, so no config call either.
-    assert not any(f.get("method") == "session/set_config_option" for f in sent)
+    # The route is selected on every turn, naming the default when the agent
+    # names no model — DSH's shipped ACP config pins one nobody chose, and the
+    # selection is what decides the image gate (server/dsh_home.py).
+    config = next(f for f in sent if f.get("method") == "session/set_config_option")
+    assert config["params"]["value"] == '["deepseek-official","deepseek-flash"]'
 
 
 @pytest.mark.asyncio
