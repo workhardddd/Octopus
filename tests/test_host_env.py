@@ -50,10 +50,15 @@ def test_only_the_proxy_names_are_carried_over(monkeypatch):
     assert "OCTOPUS_AUTH_TOKEN" not in env
 
 
+@pytest.mark.skipif(not WINDOWS, reason="TEMP/TMP are how Windows names a temp dir")
 def test_a_backend_is_told_where_it_may_write_scratch_files(monkeypatch, tmp_path):
     """Without a temp dir a tool falls back to its working directory — which for
     a backend is the app's code directory, the one Octopus publishes as static
-    files."""
+    files.
+
+    Windows-only on purpose: a POSIX host falls back to `/tmp`, which is a place
+    a tool may actually use, so there is nothing to carry over.
+    """
     monkeypatch.setenv("TEMP", str(tmp_path))
     monkeypatch.setenv("TMP", str(tmp_path))
 
