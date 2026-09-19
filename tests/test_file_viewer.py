@@ -187,8 +187,11 @@ async def session_with_files(client, tmp_path):
     populate it with files of various kinds. Returns (session_id, root)."""
     root = tmp_path / "wd"
     root.mkdir()
-    (root / "plan.md").write_text("# plan\nstep one")
-    (root / "main.py").write_text("def main():\n    pass\n")
+    # Written with an explicit newline so the byte count the route reports is
+    # the same on every platform — text mode would turn `\n` into `\r\n` on
+    # Windows and the size assertions would be off by one per line.
+    (root / "plan.md").write_text("# plan\nstep one", newline="\n")
+    (root / "main.py").write_text("def main():\n    pass\n", newline="\n")
     (root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
     (root / "doc.pdf").write_bytes(b"%PDF-1.4\nfake")
     (root / "blob.bin").write_bytes(b"\x00\x01")

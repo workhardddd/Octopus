@@ -101,7 +101,7 @@ it is the only way to be right, because a console break exits `0xC000013A` and
 | `server/codex_login.py` | Group kill through the module; spawn kwargs. |
 | `server/applications.py`, `server/routers/` | `os.path.commonpath` no longer raises when a probe path shares no drive with the managed root — a traversal probe returned 500 instead of 404 on Windows. |
 | `server/mcp_servers/bg.py` | The tool description says "a POSIX shell (`sh -c`)", which is true on both platforms. |
-| `web/playwright.config.ts` | The e2e webServer starts `.venv\Scripts\python.exe -m uvicorn` on Windows. |
+| `web/playwright.config.ts` | The e2e webServer runs `$OCTOPUS_E2E_PYTHON` (defaulting to the checkout's venv, `Scripts` on Windows) — this box has no PyPI access, so its interpreter is named by the environment instead. |
 
 ## 5. Tests
 
@@ -116,9 +116,17 @@ it is the only way to be right, because a console break exits `0xC000013A` and
 - Two tests carry a `skipif(os.name == "nt")` with the reason: the fallback-PATH
   test (a systemd premise, and a `#!/bin/sh` probe) and the external-`SIGTERM`
   test (asserts the negative exit code a POSIX signal leaves).
+- Five unrelated tests were making a POSIX premise they did not have to make and
+  now run everywhere: four asserted a stored `working_dir` as `/tmp` (the route
+  normalizes to an absolute path, which on Windows is `D:\tmp`), and
+  `tests/test_cli_gate.py` used the POSIX `true`/`false` binaries — which do not
+  exist on Windows, so "a logged-out CLI exits non-zero" passed for the wrong
+  reason. `tests/test_file_viewer.py`'s fixture wrote its sample file in text
+  mode (CRLF inflated the byte count), and `test_session_duplicate`'s HOME
+  isolation is still open (§7).
 
-Counts: **1168** backend tests (was 1160). Authoritative run in the Linux
-container: **1126 passed / 42 skipped / 0 failed**.
+Counts: **1169** backend tests (was 1160). Authoritative run in the Linux
+container: **1127 passed / 42 skipped / 0 failed**.
 
 ## 6. Verified where
 
@@ -127,23 +135,46 @@ container: **1126 passed / 42 skipped / 0 failed**.
   `/api/backends` → `["dsh","claude-code","codex"]`; the real group-reaping test
   passes (a grandchild dies with its group); `test_harness_core.py` +
   `test_bg_tasks.py` + `test_proc.py` green apart from the two documented
-  POSIX-only skips.
+  POSIX-only skips; **Playwright's `:fast` bucket 41/41** in a real browser
+  against a real backend started by the config above — which includes the mocked
+  DSH credential dialog.
 - **Linux container**: the full suite, nothing skipped beyond the CLI gates.
 
 ## 7. What this defers
 
-Genuine deferrals — work that needs a decision or a host this one is not:
+Genuine deferrals — work that needs a decision, a design, or a host this one is
+not. **The Python suite is green on Linux and has a known tail on Windows**:
+running everything except the `*_real.py` suites natively gives 1114 passed / 3
+skipped / **13 failed**, every one of them a Windows premise rather than a
+Windows bug (they pass on Linux). Grouped, with what each needs:
 
-- **Applications on Windows.** `start.sh` / `install.sh` are executed directly,
-  which Windows cannot do for a `.sh` (it would need the POSIX shell from §2 and
-  a decision about shebangs); `os.access(path, os.X_OK)` is an existence check
-  there, so "declared by an *executable* script" has no Windows meaning; and the
-  symlink guards cannot be exercised without a symlink privilege this box does
-  not have. Seven tests in `tests/test_applications.py` fail on Windows for
-  exactly these reasons and pass on Linux. Everything else in Applications works.
+- **A symlink privilege this host does not have** (4: three icon/traversal guards  in `test_applications.py`, one in `test_file_viewer.py`). `os.symlink` fails
+  with `WinError 1314` unless the process is elevated or Developer Mode is on, so
+  the symlink-escape guards cannot be exercised at all here. Needs a
+  capability-skip (`can_we_symlink()`), the way the CLI gates skip.
+- **Applications' backend scripts** (4 in `test_applications.py`).
+  `start.sh`/`install.sh` are executed directly, which Windows cannot do for a
+  `.sh` — it would need the POSIX shell from §2 plus a decision about shebangs —
+  and `os.access(path, os.X_OK)` is an existence check there, so "declared by an
+  *executable* script" has no Windows meaning. Everything else in Applications
+  works.
+- **A test that isolates `$HOME`** (2: `test_agent_memory`,
+  `test_session_duplicate`). Windows' `os.path.expanduser("~")` reads
+  `USERPROFILE`, not `HOME`, so those tests resolve to the developer's real
+  profile — and write into it (`~/.octopus/fork/…`), which is how the tail was
+  found. Needs a `USERPROFILE` mirror wherever `HOME` is monkeypatched.
+- **A POSIX premise in the test itself** (3): `test_subprocess_path` asserts the
+  POSIX fallback dirs (`~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`);
+  the two `test_fork_native_copy` cases use Claude Code's POSIX project layout
+  (`~/.claude/projects/-x-y`) and a directory-vs-file trick that Windows'
+  `unlink` refuses before the OSError the test wants.
+
+Also deferred:
+
 - **A `sh` that is not Git for Windows** (Cygwin, MSYS2, WSL) — the resolver
   knows the two standard Git layouts; anything else must be on PATH.
 - **`token_rotation`'s `os.chmod(0o600)`** is a no-op on Windows, where file
   permissions are ACLs: the rewritten env file inherits its directory's
   permissions. Not a regression, but it is not the guarantee the POSIX doc
   describes.
+

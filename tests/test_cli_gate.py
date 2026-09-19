@@ -8,20 +8,28 @@ skip, "we couldn't tell" is not.
 """
 
 import subprocess
+import sys
 
 import pytest
 
 from tests.cli_gate import CliProbeTimeout, _probe
 
+# The gate only reads the exit status, so the stand-ins are this interpreter
+# rather than the POSIX `true`/`false` binaries — which do not exist on Windows,
+# where they made the "a logged-out CLI exits non-zero" case pass for the wrong
+# reason.
+_ANSWERS = [sys.executable, "-c", "pass"]
+_FAILS = [sys.executable, "-c", "raise SystemExit(1)"]
+
 
 def test_probe_returns_true_when_the_cli_answers():
-    assert _probe(["true"], timeout=10) is True
+    assert _probe(_ANSWERS, timeout=10) is True
 
 
 def test_probe_returns_false_when_the_cli_fails():
     """A logged-out CLI exits non-zero — that IS evidence, so dependent tests
     legitimately skip."""
-    assert _probe(["false"], timeout=10) is False
+    assert _probe(_FAILS, timeout=10) is False
 
 
 def test_probe_returns_false_when_the_binary_is_missing():
@@ -38,10 +46,10 @@ def test_probe_retries_once_before_giving_up(monkeypatch):
         calls.append(kwargs["timeout"])
         if len(calls) == 1:
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        return real_run(["true"], **{k: v for k, v in kwargs.items() if k != "timeout"})
+        return real_run(_ANSWERS, **{k: v for k, v in kwargs.items() if k != "timeout"})
 
     monkeypatch.setattr(subprocess, "run", flaky)
-    assert _probe(["true"], timeout=5) is True
+    assert _probe(_ANSWERS, timeout=5) is True
     # Second attempt gets a longer budget than the first.
     assert calls == [5, 10]
 

@@ -1,5 +1,7 @@
 """End-to-end tests for REST API using FastAPI TestClient."""
 
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -65,7 +67,7 @@ async def test_create_session(client):
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Test Session"
-    assert data["working_dir"] == "/tmp"
+    assert data["working_dir"] == os.path.abspath("/tmp")
     assert data["status"] == "idle"
     assert "id" in data
 
@@ -138,7 +140,7 @@ async def test_archive_session(client):
     new_id = body["id"]
     assert new_id != old_id
     assert body["name"] == "Archive Me"
-    assert body["working_dir"] == "/tmp/archived"
+    assert body["working_dir"] == os.path.abspath("/tmp/archived")
 
     # Old session is hidden from the list; new one appears.
     list_resp = await client.get("/api/sessions", headers=HEADERS)
