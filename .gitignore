@@ -14,3 +14,6 @@ octopus-dev.db*
 
 # Intermediate file from `bun run generate:contracts`
 web/.openapi.json
+
+# Launcher logs (scripts/start.cmd -> logs/server.*.log)
+logs/

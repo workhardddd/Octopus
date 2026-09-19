@@ -152,6 +152,7 @@ gained `POST /api/agents/{id}/unarchive` for the same tab).
   `ApplicationFormPage`) rather than a dialog. `PageHeader` is the shared
   breadcrumb bar.
 - `scripts/test.py` + `scripts/test-linux.Dockerfile` — The backend suite's entry point (`python scripts/test.py [pytest args]`, `--fast`, `--linux`): picks an interpreter that can actually import the suite, deselects the real-CLI modules before their availability probes can block collection, and runs the authoritative POSIX pass in an image built once instead of re-installed per run.
+- `scripts/start.cmd` + `scripts/start.ps1` — Starting the server on Windows, double-clickable. Runs `python -m server.cli serve` **from the checkout** (`octopus.db` is a relative path, so the working directory is load-bearing), leaves an already-answering server alone instead of racing it for the port, names a port held by something else, writes `logs/server.{out,err}.log`, and prints the tail of those instead of vanishing when it cannot come up (`-NoBrowser`, `-Foreground`).
 - `tests/` — Backend tests (pytest)
 - `web/src/**/*.test.ts` — Frontend unit tests (vitest, colocated with source)
 - `web/e2e/` — End-to-end tests (Playwright, auto-cleanup after runs)
@@ -171,7 +172,8 @@ python scripts/test.py tests/test_proc.py     # one file — seconds; iterate li
 python scripts/test.py --fast                 # minus the *_real.py modules (no CLI probes)
 python scripts/test.py --linux                # authoritative POSIX pass, reusable image
 python scripts/test.py --build-only           # (re)build that image
-.venv/bin/uvicorn server.main:app             # start server (serves web/dist/)
+scripts\start.cmd                             # Windows: start the server (double-clickable); logs\
+.venv/bin/uvicorn server.main:app             # or start it directly (serves web/dist/)
 
 # Frontend
 cd web && bun run test                  # run frontend unit tests
