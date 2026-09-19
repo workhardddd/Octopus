@@ -223,7 +223,9 @@ def test_select_mcp_servers_all_by_default():
     assert bg.env["OCTOPUS_SESSION_ID"] == "s"
     ask_agent_entry = next(e for e in entries if e.key == "ask_agent")
     assert ask_agent_entry.env["OCTOPUS_SESSION_ID"] == "s"
-    assert ask_agent_entry.args[-1] == "server.mcp_servers.ask_agent"
+    # `-P` keeps the child's cwd off `sys.path` (mcp_launch test file); the
+    # module name still ends the argv so the harnesses render it unchanged.
+    assert ask_agent_entry.args == ["-P", "-m", "server.mcp_servers.ask_agent"]
 
 
 def test_select_mcp_servers_subset():
