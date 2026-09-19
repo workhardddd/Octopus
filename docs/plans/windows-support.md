@@ -87,7 +87,7 @@ it is the only way to be right, because a console break exits `0xC000013A` and
 
 | File | Purpose |
 |---|---|
-| `server/proc.py` | The platform vocabulary above: group isolation at spawn, group terminate/kill, non-destructive liveness. |
+| `server/proc.py` | The platform vocabulary above: group isolation at spawn, group terminate/kill, non-destructive liveness. Later also the POSIX shell it resolves (`find_posix_shell`, `shell_argv`, `shell_env_path`) — one vocabulary for both the bg shell and the app backends. |
 | `tests/test_proc.py` | The per-platform spawn kwargs, and that probing a process never ends it. |
 
 **Changed**
@@ -96,10 +96,10 @@ it is the only way to be right, because a console break exits `0xC000013A` and
 |---|---|
 | `server/harness/run.py` | `prepare_spawn` → `spawn_kwargs()`; `stop()`'s escalation → `terminate_group`/`kill_group`; the private `_terminate_process_group` is gone. |
 | `server/harness/harness.py` | `run_oneshot`'s reap → `kill_group`. |
-| `server/app_backends.py` | The import-time `signal.SIGKILL` default that blocked every import; spawns and the stop escalation go through the module. |
-| `server/bg_tasks.py` | Shell resolution + PATH augmentation; group stop/force through the module; `force_stopped`. |
+| `server/app_backends.py` | The import-time `signal.SIGKILL` default that blocked every import; spawns and the stop escalation go through the module. Later: `install.sh`/`start.sh` spawn through `shell_argv()` (they were exec'd directly, which Windows cannot do for a `.sh`), `script_env` puts the shell's bin dirs ahead of `PATH`, and a host with no shell says so instead of raising `WinError 193`. |
+| `server/bg_tasks.py` | Shell resolution + PATH augmentation; group stop/force through the module; `force_stopped`. The shell helpers now live in `proc.py` and are re-exported here. |
 | `server/codex_login.py` | Group kill through the module; spawn kwargs. |
-| `server/applications.py`, `server/routers/` | `os.path.commonpath` no longer raises when a probe path shares no drive with the managed root — a traversal probe returned 500 instead of 404 on Windows. |
+| `server/applications.py`, `server/routers/` | `os.path.commonpath` no longer raises when a probe path shares no drive with the managed root — a traversal probe returned 500 instead of 404 on Windows. Later: `backend_script()` consults `X_OK` only on POSIX, and the build prompt stopped telling agents to `chmod` a script that is handed to `sh`. |
 | `server/mcp_servers/bg.py` | The tool description says "a POSIX shell (`sh -c`)", which is true on both platforms. |
 | `web/playwright.config.ts` | The e2e webServer runs `$OCTOPUS_E2E_PYTHON` (defaulting to the checkout's venv, `Scripts` on Windows) — this box has no PyPI access, so its interpreter is named by the environment instead. |
 
@@ -147,25 +147,75 @@ green on both platforms now**: everything except the `*_real.py` suites runs
 natively on Windows at 1117 passed / 14 skipped / **0 failed**, and in the Linux
 container at 1127 passed / 42 skipped / 0 failed of 1169.
 
-The 11 Windows skips are each a *platform premise the test cannot express*, not a
-bug, and each states it in its own `reason`:
+The Windows skips that remain are each a *platform premise the test cannot
+express*, not a bug, and each states it in its own `reason`:
 
-- **A symlink privilege this host does not have** (4: three icon/traversal guards
-  in `test_applications.py`, one in `test_file_viewer.py`). `os.symlink` fails
+- **A symlink privilege this host does not have**: three icon/traversal guards in
+  `test_applications.py` and one in `test_file_viewer.py`. `os.symlink` fails
   with `WinError 1314` unless the process is elevated or Developer Mode is on, so
   the guard cannot be exercised here at all — a capability skip through
   `tests/capabilities.py::can_symlink()`, the same shape as the CLI gates.
-- **Applications' backend scripts** (4 in `test_applications.py`).
-  `start.sh`/`install.sh` are executed directly, which Windows cannot do for a
-  `.sh` — it would need the POSIX shell from §2 plus a decision about shebangs —
-  and `os.access(path, os.X_OK)` is an existence check there, so "declared by an
-  *executable* script" has no Windows meaning. **This one is a real product gap,
-  tracked as its own decision**; everything else in Applications works.
 - **A POSIX premise in the test itself** (3): `test_subprocess_path` asserts the
   POSIX fallback dirs (`~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`);
   the two `test_fork_native_copy` cases use Claude Code's POSIX project layout
   (`~/.claude/projects/-x-y`) and pin the POSIX project-slug encoding, which is
   not the same string on Windows.
+
+### Applications' backend scripts — fixed, and no longer skipped
+
+`start.sh`/`install.sh` used to be exec'd directly on every platform. Windows
+cannot start a `.sh` at all (`CreateProcess` → `WinError 193`), so **every
+Application with a backend died on install there** — silently, as a `failed`
+state — while POSIX worked. It was the one item in this document marked a real
+product gap, and §2 already had the answer: resolve the shell, do not assume it.
+
+Both scripts now go through `proc.shell_argv()`, which is the single place that
+decides:
+
+| Platform | What runs | Why |
+|---|---|---|
+| POSIX | `[script]` (direct, as before) | The kernel honours the shebang, and `X_OK` is meaningful — so a `#!/usr/bin/env bash` script still gets **bash**, not whichever `/bin/sh` the distro ships. |
+| Windows | `[<git>/bin/sh.exe, script]` | No exec bit, no shebang; `sh` is the only way to run it, and it makes the shebang irrelevant rather than required. |
+
+Consequences, all deliberate:
+
+- `backend_script()` keeps the `X_OK` rule on POSIX (a forgotten `chmod` still
+  reads as "no backend") and uses presence on Windows, where `os.access(X_OK)`
+  is only an existence check. The four `test_applications.py` cases that skipped
+  for this reason now run on both platforms.
+- `test_a_real_backend_answers_through_the_proxy` — the end-to-end one, a real
+  HTTP server in a real subprocess — no longer skips on Windows. That test is
+  the regression test for this bug; it skipped precisely where the feature was
+  broken.
+- The scripts get the shell's own bin dirs ahead of `PATH` (`shell_env_path`),
+  because Git keeps `sh` and its coreutils off the machine PATH — without it an
+  `install.sh` using `sleep`, `grep` or `git` exits 127.
+- `script_env` now passes `SystemDrive`. `PATH`/`HOME`/`LANG` alone are a
+  POSIX-shaped environment, and MSYS2's `sh` resolves `%SystemDrive%` through it:
+  with the variable missing, the literal string became a relative path and the
+  shell recreated `%SystemDrive%\ProgramData\Microsoft\Windows\Caches` **inside
+  the app's code directory** on every install — the directory published as
+  static files. Nothing failed; a cache tree just appeared next to app source.
+  Two tests pin it: `script_env` carries the variable, and running a real
+  `install.sh` leaves the code directory byte-for-byte unchanged.
+- No shell on the host → the install/start state carries an explanation instead
+  of a `WinError` about a file Windows never understood.
+- The build prompt no longer tells the agent to `chmod` its scripts, and says
+  why `bash`-only syntax and `.cmd`/`.bat` are both wrong: Octopus runs them on
+  whatever platform it is installed on.
+
+`find_posix_shell`/`PosixShell`/`shell_env_path` moved from `bg_tasks.py` to
+`proc.py` — the platform vocabulary — so the bg shell and the app backends
+resolve the shell the same way, and it is still re-exported from `bg_tasks` for
+the tests that document it there.
+
+Measured on this box after the fix: `test_applications.py` alone went from
+73 passed / 5 skipped to **75 passed / 3 skipped**, and the four touched files
+(`test_applications`, `test_bg_tasks`, `test_proc`, `test_app_agent`) to
+**139 passed / 6 skipped / 0 failed**. Every backend-script skip is gone; the
+six left are the symlink guards and POSIX-only process semantics, which a Windows
+host genuinely cannot exercise. (The suite-wide figures in §1 are from the
+earlier Windows run and were not re-measured here — only these files were.)
 
 Two more were *bugs in the tests*, fixed rather than skipped: tests that isolated
 `$HOME` resolved to the developer's real profile on Windows (which reads

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1084,20 +1086,23 @@ def _script(app_dir: str, name: str, body: str, executable: bool = True) -> None
 
     path = Path(app_dir) / name
     path.write_text(body)
-    if executable:
-        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    # Set *and clear* the bit. Rewriting a file that was already executable
+    # leaves its mode alone, so a test asking for a non-executable script would
+    # quietly keep testing an executable one — which is exactly what happened on
+    # POSIX, where the "no X_OK, no run" case then failed instead of passing.
+    bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    mode = path.stat().st_mode
+    path.chmod(mode | bits if executable else mode & ~bits)
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="'executable' has no Windows meaning — os.access(X_OK) is an "
-    "existence check there — so the declaration rule under test cannot be "
-    "expressed; windows-support.md §7",
-)
 def test_a_backend_is_declared_by_an_executable_start_script(tmp_path):
-    """Presence of `start.sh` IS the declaration — there is no manifest. A
-    non-executable one reports as absent rather than being run, so a forgotten
-    chmod fails as "no backend" instead of a confusing exec error."""
+    """Presence of `start.sh` IS the declaration — there is no manifest.
+
+    On POSIX a non-executable script reports as absent rather than being run, so
+    a forgotten `chmod` fails as "no backend" instead of a confusing exec error.
+    On Windows there is no exec bit, so presence is the whole rule (that is the
+    platform half of this, and it is why the test no longer skips there).
+    """
     from server.applications import has_backend
 
     d = tmp_path / "app"
@@ -1105,10 +1110,43 @@ def test_a_backend_is_declared_by_an_executable_start_script(tmp_path):
     assert has_backend(str(d)) is False
 
     _script(str(d), "start.sh", "#!/bin/sh\nsleep 1\n", executable=False)
-    assert has_backend(str(d)) is False
+    assert has_backend(str(d)) is (os.name == "nt")
 
     _script(str(d), "start.sh", "#!/bin/sh\nsleep 1\n")
     assert has_backend(str(d)) is True
+
+
+def test_a_script_is_handed_to_the_shell_where_direct_exec_cannot_work(tmp_path):
+    """The bug this came from: `install.sh`/`start.sh` were exec'd directly on
+    every platform. Windows cannot start a `.sh` at all — `CreateProcess` fails
+    with `WinError 193` — so every backend there died on install while POSIX
+    quietly worked, and nothing said why (`windows-support.md` §7).
+
+    POSIX keeps the old behaviour deliberately: the kernel honours the shebang,
+    so `#!/usr/bin/env bash` still gets bash. Handing it to `/bin/sh` instead
+    would run it under `dash` on Debian and `bash` on macOS."""
+    from server.proc import shell_argv
+
+    d = tmp_path / "app"
+    d.mkdir()
+    _script(str(d), "start.sh", "#!/bin/sh\nexit 0\n")
+    script = str(d / "start.sh")
+
+    argv = shell_argv(script)
+    assert argv is not None
+    if os.name == "nt":
+        # resolved `sh`, then the script — never the script alone.
+        assert argv[-1] == script
+        assert len(argv) == 2 and "sh" in os.path.basename(argv[0]).lower()
+    else:
+        assert argv == [script]
+
+    # A script the host could not run at all is refused, not attempted.
+    _script(str(d), "start.sh", "#!/bin/sh\nexit 0\n", executable=False)
+    if os.name == "nt":
+        assert shell_argv(script) is not None  # presence is the whole rule
+    else:
+        assert shell_argv(script) is None  # no X_OK, no run
 
 
 def test_script_environment_excludes_the_servers_own(monkeypatch):
@@ -1128,6 +1166,45 @@ def test_script_environment_excludes_the_servers_own(monkeypatch):
     assert env["PORT"] == "4100"
 
 
+def test_a_script_environment_still_says_where_windows_is(monkeypatch):
+    """`PATH`/`HOME`/`LANG` alone are a POSIX-shaped environment, and the POSIX
+    shell Git ships on Windows needs `SystemDrive` to resolve `%SystemDrive%`.
+
+    Without it the literal string becomes a *relative* path and the shell
+    recreates `%SystemDrive%\\ProgramData\\Microsoft\\Windows\\Caches` inside the
+    app's code directory — the one Octopus publishes as static files. Nothing
+    fails, which is exactly why it needs a test.
+    """
+    from server.app_backends import script_env
+
+    monkeypatch.setenv("SystemDrive", "D:")
+    assert script_env("a1", "/apps/demo")["SystemDrive"] == "D:"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a Windows shell's %VAR% resolution")
+def test_running_a_script_does_not_litter_the_code_directory(tmp_path):
+    """The regression test for the above: run a real `install.sh` through the
+    real spawn path and assert the code directory is unchanged.
+
+    `test_a_real_backend_answers_through_the_proxy` passes either way — the
+    backend works fine while silently dropping a cache tree next to its own
+    source.
+    """
+    from server.app_backends import script_env
+    from server.proc import shell_argv
+
+    app = tmp_path / "app"
+    app.mkdir()
+    _script(str(app), "install.sh", "#!/bin/sh\nexit 0\n")
+
+    before = sorted(os.listdir(app))
+    argv = shell_argv(str(app / "install.sh"))
+    assert argv is not None
+    subprocess.run(argv, cwd=str(app), env=script_env("a1", str(app)),
+                   capture_output=True, timeout=120)
+    assert sorted(os.listdir(app)) == before
+
+
 def test_data_and_runtime_are_siblings_not_subdirectories(tmp_path):
     """The data directory must survive a rebuild rewriting the code directory,
     which a subdirectory of it would not."""
@@ -1140,11 +1217,6 @@ def test_data_and_runtime_are_siblings_not_subdirectories(tmp_path):
         assert not d.startswith(app + os.sep)
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="starts a real start.sh, which Windows cannot execute directly — "
-    "windows-support.md §7",
-)
 @pytest.mark.asyncio
 async def test_a_real_backend_answers_through_the_proxy(client):
     """The whole feature, end to end: an application ships `start.sh`, Octopus
@@ -1153,17 +1225,22 @@ async def test_a_real_backend_answers_through_the_proxy(client):
     The backend here is a real HTTP server in a real subprocess — a stub would
     prove the routing and none of the contract (port binding, foreground
     execution, readiness, teardown).
+
+    It runs on Windows too now, which is what makes it the regression test for
+    the shell fix: before it, this test skipped there and the feature was dead
+    on arrival. The script names the interpreter explicitly rather than relying
+    on `python3` existing under `sh`.
     """
     from server.app_backends import backend_supervisor
 
     app_row = await _api_create(client, name="With Backend")
     app_dir = app_row["app_dir"]
     Path(app_dir, "index.html").write_text("<html>ui</html>")
+    interpreter = sys.executable.replace("\\", "/")
     _script(
         app_dir,
         "start.sh",
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
+        "#!/bin/sh\n"
         "cat > \"$APP_RUNTIME_DIR/serve.py\" <<'EOF'\n"
         "import json, os\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
@@ -1179,7 +1256,7 @@ async def test_a_real_backend_answers_through_the_proxy(client):
         "        pass\n"
         "HTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()\n"
         "EOF\n"
-        'exec python3 "$APP_RUNTIME_DIR/serve.py"\n',
+        f'exec "{interpreter}" "$APP_RUNTIME_DIR/serve.py"\n',
     )
     os.makedirs(Path(app_dir + ".runtime"), exist_ok=True)
 
@@ -1218,11 +1295,6 @@ async def test_proxy_is_404_when_the_app_has_no_backend(client):
     assert "no backend" in resp.text.lower()
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="starts a real start.sh, which Windows cannot execute directly — "
-    "windows-support.md §7",
-)
 @pytest.mark.asyncio
 async def test_proxy_reports_a_broken_backend_rather_than_hanging(client):
     """A backend that exits immediately is a 503 naming the reason, not a 500
@@ -1254,23 +1326,27 @@ async def test_proxy_requires_auth(client):
     assert resp.status_code == 401
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="starts a real start.sh, which Windows cannot execute directly — "
-    "windows-support.md §7",
-)
 @pytest.mark.asyncio
 async def test_deleting_an_application_stops_its_backend(client):
     """A running server must not outlive its application. Nothing points at it
     afterwards, so neither the reaper nor shutdown could ever reach it — it
-    would keep its port and hold files open under a deleted directory."""
+    would keep its port and hold files open under a deleted directory.
+
+    On Windows this is also the teardown test for the shell indirection: the
+    supervised process may be the shell rather than the server, so the kill has
+    to reach a *tree* (`taskkill /F /T`), not one pid.
+    """
     from server.app_backends import RUNNING, backend_supervisor
 
     app_row = await _api_create(client, name="Doomed Backend")
+    # The interpreter is named, not assumed: `python3` does not exist under a
+    # Windows `sh`, and a script that dies on line 1 would make this test pass
+    # for the wrong reason (no server to outlive anything).
+    interpreter = sys.executable.replace("\\", "/")
     _script(
         app_row["app_dir"],
         "start.sh",
-        '#!/usr/bin/env bash\nexec python3 -m http.server "$PORT" --bind 127.0.0.1\n',
+        f'#!/bin/sh\nexec "{interpreter}" -m http.server "$PORT" --bind 127.0.0.1\n',
     )
     try:
         resp = await client.get(f"/apps/{app_row['id']}/api/x", headers=HEADERS)

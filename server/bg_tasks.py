@@ -32,7 +32,6 @@ import asyncio
 import logging
 import os
 import shlex
-import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -40,96 +39,28 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .database import Database
-from .proc import kill_group, spawn_kwargs, terminate_group
+from .proc import (
+    PosixShell,
+    find_posix_shell,
+    kill_group,
+    shell_env_path,
+    spawn_kwargs,
+    terminate_group,
+)
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass(frozen=True)
-class PosixShell:
-    """The shell a bg command runs under, and the directories its own tools
-    live in."""
-
-    path: str
-    # Git for Windows keeps `sh` next to its coreutils (sleep, grep, sed …) but
-    # off the machine's PATH, so a command using any of them would exit 127 if
-    # we only knew the shell's path.
-    extra_path_dirs: tuple[str, ...] = ()
-
-
-def find_posix_shell() -> PosixShell | None:
-    """The POSIX shell a bg command runs under, or None when this host has none.
-
-    The shell is not a preference — the model is taught to write POSIX shell
-    syntax, and the tool description says so. On POSIX that is `/bin/sh`. On
-    Windows it is whatever `sh` the host has, which Git for Windows ships but
-    usually does not put on PATH; with none installed the task is refused with
-    an explanation instead of being handed to `cmd.exe`, where most of what the
-    model writes would fail in ways it cannot see.
-    """
-    if os.name != "nt":
-        return PosixShell("/bin/sh")
-
-    candidates: list[str] = []
-    found = shutil.which("sh")
-    if found:
-        candidates.append(found)
-    for base in (
-        os.environ.get("ProgramFiles"),
-        os.environ.get("ProgramFiles(x86)"),
-        os.environ.get("LOCALAPPDATA"),
-    ):
-        if not base:
-            continue
-        for leaf in ("Git/bin/sh.exe", "Git/usr/bin/sh.exe", "Programs/Git/bin/sh.exe"):
-            candidate = os.path.join(base, *leaf.split("/"))
-            if os.path.isfile(candidate):
-                candidates.append(candidate)
-    if not candidates:
-        return None
-
-    shell = candidates[0]
-    root = _git_install_root(shell)
-    dirs = (
-        [
-            os.path.join(root, *leaf.split("/"))
-            for leaf in ("bin", "usr/bin", "mingw64/bin")
-        ]
-        if root
-        else [os.path.dirname(shell)]
-    )
-    return PosixShell(shell, tuple(d for d in dirs if os.path.isdir(d)))
-
-
-def _git_install_root(shell: str) -> str | None:
-    """The Git install a shell belongs to, if it is one.
-
-    `sh` sits at `<root>/bin/sh.exe` or `<root>/usr/bin/sh.exe`, so the root is
-    the ancestor that has both a `bin` and a `usr/bin` — which is also how we
-    recognise a Git tree rather than some other `sh` on the machine.
-    """
-    current = os.path.dirname(os.path.abspath(shell))
-    for _ in range(3):
-        if os.path.isdir(os.path.join(current, "usr", "bin")) and os.path.isdir(
-            os.path.join(current, "bin")
-        ):
-            return current
-        parent = os.path.dirname(current)
-        if parent == current:
-            break
-        current = parent
-    return None
+# `PosixShell` and `find_posix_shell` moved to `proc.py` — the platform
+# vocabulary — so Applications' backend scripts can resolve the same shell. They
+# stay importable from here because this module is where the bg shell is
+# documented and tested.
 
 
 def bg_shell_env(shell: PosixShell) -> dict[str, str]:
     """Our environment, with the shell's own bin dirs ahead of PATH so the tools
     it ships resolve for the command the model wrote."""
     env = os.environ.copy()
-    if shell.extra_path_dirs:
-        parts = [*shell.extra_path_dirs]
-        if env.get("PATH"):
-            parts.append(env["PATH"])
-        env["PATH"] = os.pathsep.join(parts)
+    env["PATH"] = shell_env_path(shell, env.get("PATH"))
     return env
 
 

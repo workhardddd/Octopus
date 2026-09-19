@@ -31,7 +31,14 @@ from .applications import (
     runtime_dir_for,
 )
 from .config import settings
-from .proc import kill_group, spawn_kwargs, terminate_group
+from .proc import (
+    find_posix_shell,
+    kill_group,
+    shell_argv,
+    shell_env_path,
+    spawn_kwargs,
+    terminate_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,13 @@ INSTALL_TIMEOUT_S = 600.0
 # shouldn't be a workspace with a dozen idle servers.
 IDLE_TIMEOUT_S = 15 * 60.0
 REAP_INTERVAL_S = 60.0
+
+# A backend's scripts are POSIX shell, so a host with no `sh` cannot run one at
+# all: saying that beats a `WinError 193` about a file it never understood.
+_NO_SHELL = (
+    "no POSIX shell found — install.sh and start.sh are POSIX scripts and this "
+    "host has no `sh`; on Windows, installing Git for Windows provides one"
+)
 # Hard cap on concurrently running backends, least-recently-used evicted first.
 MAX_RUNNING = 4
 # Log tail kept in memory for the UI; the full log is on disk.
@@ -163,6 +177,14 @@ def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[st
         # `/tmp`, which is not a place a Windows tool can look for its config).
         "HOME": host.get("HOME") or os.environ.get("HOME") or "/tmp",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        # Windows' own idea of where Windows is. `PATH`/`HOME`/`LANG` alone are a
+        # POSIX-shaped environment, and the POSIX shell shipped with Git (MSYS2)
+        # needs this one to resolve `%SystemDrive%`: without it the literal string
+        # becomes a *relative* path, and the shell recreates
+        # `%SystemDrive%\ProgramData\Microsoft\Windows\Caches` inside the app's
+        # code directory on every install. Harmless-looking, but it lands in the
+        # directory Octopus publishes as static files.
+        "SystemDrive": os.environ.get("SystemDrive", ""),
         # How a backend talks to the Octopus agents (app-agent-access.md §4).
         # The token is scoped to this one application, so handing it to app
         # code doesn't hand over Octopus; the URL is the loopback origin, not
@@ -170,6 +192,12 @@ def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[st
         "OCTOPUS_AGENT_API": f"http://127.0.0.1:{settings.port}/apps/{app_id}/agent",
         "OCTOPUS_APP_TOKEN": app_scope_token(app_id),
     }
+    # The shell's own bin dirs go ahead of PATH: Git for Windows ships the
+    # coreutils a script reaches for (`sleep`, `grep`, `sed`, `git`) next to
+    # `sh` and off the machine PATH, so an `install.sh` using one would exit 127.
+    shell = find_posix_shell()
+    if shell is not None:
+        env["PATH"] = shell_env_path(shell, env["PATH"])
     if port is not None:
         env["PORT"] = str(port)
     return env
@@ -276,9 +304,18 @@ class BackendSupervisor:
         self._log(st, "--- install.sh ---")
         os.makedirs(runtime_dir_for(app_dir), exist_ok=True)
         os.makedirs(data_dir_for(app_dir), exist_ok=True)
+        # Run it *under the POSIX shell*, never exec the `.sh` directly: Windows
+        # cannot start one (WinError 193), and on POSIX this is the same thing
+        # with one fewer thing to get wrong (`proc.shell_argv`).
+        argv = shell_argv(script)
+        if argv is None:
+            st.state = FAILED
+            st.error = _NO_SHELL
+            self._log(st, st.error)
+            return False
         try:
             proc = await asyncio.create_subprocess_exec(
-                script,
+                *argv,
                 cwd=app_dir,
                 env=script_env(app_id, app_dir),
                 stdout=asyncio.subprocess.PIPE,
@@ -359,9 +396,16 @@ class BackendSupervisor:
         st.port = port
         self._log(st, f"--- start.sh (port {port}) ---")
         os.makedirs(data_dir_for(st.app_dir), exist_ok=True)
+        argv = shell_argv(script)
+        if argv is None:
+            st.state = FAILED
+            st.error = _NO_SHELL
+            st.failed_at = time.monotonic()
+            self._log(st, st.error)
+            return
         try:
             proc = await asyncio.create_subprocess_exec(
-                script,
+                *argv,
                 cwd=st.app_dir,
                 env=script_env(st.app_id, st.app_dir, port=port),
                 stdout=asyncio.subprocess.PIPE,

@@ -143,20 +143,25 @@ def runtime_dir_for(app_dir: str) -> str:
 
 
 def backend_script(app_dir: str, name: str) -> str | None:
-    """Path to `install.sh` / `start.sh` if the app ships an executable one.
+    """Path to `install.sh` / `start.sh` if the app ships one.
 
     Presence of `start.sh` IS the declaration that an application has a
-    backend — there is no manifest (application-backends.md §2). A file that
-    isn't executable is reported as missing rather than run, so a
-    `chmod`-forgotten script fails as "no backend" instead of as a confusing
-    exec error.
+    backend — there is no manifest (application-backends.md §2).
+
+    The script is run as `sh <script>`, so a missing shebang cannot make it
+    unrunnable (`proc.shell_argv`). On POSIX a file that is not executable is
+    still reported as missing rather than run, so a forgotten `chmod` fails as
+    "no backend" instead of as a confusing exec error; on Windows there is no
+    X_OK bit to consult — `os.access(path, X_OK)` is an existence check there —
+    so the file's presence is the whole rule, which is what
+    `windows-support.md` §7 asks for.
     """
     if name not in ("install.sh", "start.sh"):
         raise ValueError(f"not a backend script: {name}")
     path = resolve_within(app_dir, name)
     if path is None or not os.path.isfile(path):
         return None
-    return path if os.access(path, os.X_OK) else None
+    return path if (os.name == "nt" or os.access(path, os.X_OK)) else None
 
 
 def has_backend(app_dir: str) -> bool:
@@ -817,13 +822,19 @@ class ApplicationManager:
             f"\nIf it needs SERVER-SIDE work — running a program, talking to "
             f"a service that blocks browser requests, or storing more than a "
             f"few megabytes — it can have a real backend:\n"
-            f"- Write an executable `start.sh` at the root that starts a "
-            f"server in the FOREGROUND on `127.0.0.1:$PORT`. Use `exec` so "
-            f"the server IS the process; a script that backgrounds it and "
-            f"returns looks like a crash to Octopus.\n"
-            f"- Put dependency installation in an executable `install.sh`, "
-            f"installing into `$APP_RUNTIME_DIR`. It runs before the first "
-            f"start and after every rebuild, so keep it idempotent.\n"
+            f"- Write `start.sh` at the root that starts a server in the "
+            f"FOREGROUND on `127.0.0.1:$PORT`. Use `exec` so the server IS the "
+            f"process; a script that backgrounds it and returns looks like a "
+            f"crash to Octopus. Write it as a POSIX `sh` script: on a host that "
+            f"cannot run a `.sh` directly Octopus hands the file to `sh`, and "
+            f"elsewhere the kernel runs it as written — so give it a `#!/bin/sh` "
+            f"line *and* the executable bit (`chmod +x start.sh install.sh`). A "
+            f"file without that bit is reported as no backend at all.\n"
+            f"- Put dependency installation in `install.sh`, installing into "
+            f"`$APP_RUNTIME_DIR`. It runs before the first start and after "
+            f"every rebuild, so keep it idempotent. Both scripts are POSIX "
+            f"`sh` — not `bash`-only syntax, not a `.cmd`/`.bat` — because "
+            f"Octopus runs them on whatever platform it is installed on.\n"
             f"- Keep the app's own data in `$APP_DATA_DIR`. A rebuild rewrites "
             f"your code and never touches that directory — anything you want "
             f"to survive goes there, nowhere else.\n"
