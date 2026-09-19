@@ -74,8 +74,25 @@ function Test-Octopus {
     }
 }
 
+# The server binds every interface, and Windows already has an inbound rule for
+# this interpreter, so the address another device needs is worth printing rather
+# than hunting for. Virtual adapters (WSL, Hyper-V) are skipped: they are not
+# reachable from the phone on the sofa.
+function Show-LanAddresses {
+    $lan = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notlike '127.*' -and
+            $_.IPAddress -notlike '169.254.*' -and
+            $_.InterfaceAlias -notmatch 'WSL|Hyper-V|vEthernet|Loopback|Bluetooth'
+        }
+    foreach ($ip in $lan) {
+        Say "  on your network: http://$($ip.IPAddress):$Port   ($($ip.InterfaceAlias))"
+    }
+}
+
 if (Test-Octopus) {
     Say "already running: $Url"
+    Show-LanAddresses
     if (-not $NoBrowser) { Start-Process $Url }
     exit 0
 }
@@ -121,6 +138,7 @@ for ($i = 0; $i -lt 45; $i++) {
     if (Test-Octopus) {
         Say "up: $Url   (pid $($proc.Id))"
         Say "log: $OutLog"
+        Show-LanAddresses
         if (-not $NoBrowser) { Start-Process $Url }
         exit 0
     }
