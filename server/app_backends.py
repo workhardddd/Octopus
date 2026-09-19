@@ -85,21 +85,83 @@ def _port_accepts(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def host_env() -> dict[str, str]:
+    """The host facts a backend needs and cannot derive for itself.
+
+    Octopus deliberately does not hand a backend the server's environment — it
+    carries the auth token, credentials and tunnel config (plan §4). But
+    "minimal" has to still mean *usable*: a POSIX-shaped `PATH`/`HOME`/`LANG`
+    leaves Windows tools unable to find their own system root, their temp dirs,
+    or the machine's proxy, and none of that fails loudly. Both of the following
+    were a real app's backend, measured, not hypothetical:
+
+    * Without `SystemRoot`, git's curl could not reach even a *loopback* proxy —
+      `Failed to connect to 127.0.0.1 port 7891` — one variable apart from a
+      working run.
+    * With `HOME` set to a POSIX `/tmp` (the server's own value on Windows),
+      git never read `~/.gitconfig`: no proxy, no CA settings, no credential
+      helper. A `git fetch` then hung on a direct connection to the git host
+      instead of failing, which in the UI looks like a clone that never ends.
+
+    Nothing here is secret: a home directory, a temp directory, and the proxy
+    the machine already uses. The token is still not in this dict, which is what
+    the exclusion test pins.
+    """
+    env: dict[str, str] = {}
+    if os.name == "nt":
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if home:
+            # Both, and consistently: Windows tools resolve the profile from
+            # `USERPROFILE`, git prefers `HOME` when it is set, and a mismatch
+            # is how one of them ends up looking in a directory that is not the
+            # user's.
+            env["HOME"] = home
+            env["USERPROFILE"] = os.environ.get("USERPROFILE") or home
+        system_root = os.environ.get("SystemRoot") or os.environ.get("windir")
+        if system_root:
+            env["SystemRoot"] = system_root
+            env["windir"] = os.environ.get("windir") or system_root
+        # Where a tool writes scratch files. Without these, one that cannot find
+        # a temp dir falls back to its working directory — the app's code
+        # directory, which Octopus publishes as static files.
+        for var in ("TEMP", "TMP", "COMSPEC", "PATHEXT"):
+            value = os.environ.get(var)
+            if value:
+                env[var] = value
+    # A machine that reaches the network through a proxy says so in its
+    # environment; a backend that must make an outbound request has no other way
+    # to learn it, and no way to say it failed. Only these four, and only when
+    # set — never `os.environ.copy()`, which is what keeps the secrets out.
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"):
+        for spelling in (var, var.lower()):
+            value = os.environ.get(spelling)
+            if value:
+                env[spelling] = value
+                break
+    return env
+
+
 def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[str, str]:
     """The environment a backend script runs with.
 
     Deliberately NOT `os.environ.copy()`. The server's environment holds the
     Octopus auth token, credential material and tunnel config; a backend has no
     business seeing any of it, and inheriting it wholesale is invisible until
-    it isn't (plan §4).
+    it isn't (plan §4). What the host *does* have to contribute is in
+    `host_env()`.
     """
+    host = host_env()
     env = {
+        **host,
         "APP_ID": app_id,
         "APP_DIR": app_dir,
         "APP_DATA_DIR": data_dir_for(app_dir),
         "APP_RUNTIME_DIR": runtime_dir_for(app_dir),
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
+        # `host.get` first: on Windows the machine's home comes from
+        # `USERPROFILE`, and the server's own `HOME` may be absent (or a POSIX
+        # `/tmp`, which is not a place a Windows tool can look for its config).
+        "HOME": host.get("HOME") or os.environ.get("HOME") or "/tmp",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         # How a backend talks to the Octopus agents (app-agent-access.md §4).
         # The token is scoped to this one application, so handing it to app
