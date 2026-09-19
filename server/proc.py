@@ -21,6 +21,12 @@ so `os.kill(pid, 0)` *kills* the process and files it as exit code 0 — and if
 that pid has already been reaped and recycled by the OS, it kills whatever
 unrelated process holds it now. On POSIX the very same call is the correct,
 harmless idiom, which is what makes it so easy to carry across.
+
+The same reasoning bounds the *group* signals: they reach `pgid`, not `pid`, so
+a pid that has been recycled can point at a group we are standing in. Both
+`terminate_group` and `kill_group` therefore signal only a process that leads its
+own group — which `spawn_kwargs()` guarantees for everything this app spawns,
+and which a caller that bypassed it does not get.
 """
 
 from __future__ import annotations
@@ -116,15 +122,25 @@ def _signal_group(proc: asyncio.subprocess.Process, *, force: bool) -> bool:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, PermissionError, OSError):
         pgid = None
+    # Only a *group leader* is ours to signal, and `spawn_kwargs()` is what makes
+    # every child one (its pid is its group id). Without this check the pid alone
+    # decides which group gets the signal, and for a process that was never
+    # isolated — or one the OS has already reaped and recycled, which `pid_alive`
+    # exists for one step earlier — the answer can be a group we are standing in.
+    # `killpg` would then take down unrelated processes, ourselves included.
+    # (Found for real: a test spawned a child without `spawn_kwargs()` and then
+    # group-killed it, which killed the container's init and the whole test run.)
+    if pgid != proc.pid:
+        pgid = None
     if pgid is not None:
         try:
             os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
             return True
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    # No group to reach (never made one, or it is already gone): the direct
-    # child is still worth signalling — and the False return says children may
-    # have outlived it.
+    # No group of ours to reach (never made one, it is already gone, or the pid
+    # is not the leader): the direct child is still worth signalling — and the
+    # False return says children may have outlived it.
     try:
         if force:
             proc.kill()
