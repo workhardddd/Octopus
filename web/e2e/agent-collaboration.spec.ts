@@ -155,7 +155,7 @@ test.describe("Agent-to-agent delegation @llm", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Delegation E2E", working_dir: "/tmp" },
+      data: { name: "Delegation E2E", working_dir: "/tmp", backend: "claude-code" },
     });
     expect(sessRes.ok()).toBeTruthy();
 

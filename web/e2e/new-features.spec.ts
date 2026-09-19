@@ -107,7 +107,11 @@ async function createSessionApi(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { name, working_dir: "/tmp" },
+    // The engine is *stated*, not inherited. These specs drive real turns, and
+    // the suite's real-CLI dependency is `claude` (CLAUDE.md) — inheriting
+    // would silently follow whatever the system agent is seeded on and turn a
+    // claude-shaped assertion into a DSH one.
+    data: { name, working_dir: "/tmp", backend: "claude-code" },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -803,7 +807,7 @@ test.describe("Session credential picker", () => {
 
     const made = await request.post(`${API}/sessions`, {
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      data: { name: "Credential Swap", working_dir: "/tmp", credential_id: oldId },
+      data: { name: "Credential Swap", working_dir: "/tmp", credential_id: oldId, backend: "claude-code" },
     });
     expect(made.ok()).toBeTruthy();
     const sessionId = (await made.json()).id as string;
@@ -993,6 +997,7 @@ test.describe("Real CLI end-to-end @llm", () => {
         name: "Bad Cred Session",
         working_dir: "/tmp",
         credential_id: credId,
+        backend: "claude-code",
       },
     });
     expect(sessRes.ok()).toBeTruthy();
@@ -2002,7 +2007,7 @@ test.describe("Native sub-agents @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Subagent E2E", working_dir: wd },
+        data: { name: "Subagent E2E", working_dir: wd, backend: "claude-code" },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2076,7 +2081,7 @@ test.describe("Cross-turn bg tasks @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Run E2E", working_dir: wd },
+        data: { name: "Bg Run E2E", working_dir: wd, backend: "claude-code" },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2150,7 +2155,7 @@ test.describe("Cross-turn bg tasks @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Idle Watchdog", working_dir: wd },
+        data: { name: "Bg Idle Watchdog", working_dir: wd, backend: "claude-code" },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2251,7 +2256,7 @@ test.describe("Bg-task pipeline hardening @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Spill Pipeline", working_dir: wd },
+        data: { name: "Bg Spill Pipeline", working_dir: wd, backend: "claude-code" },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2331,7 +2336,7 @@ test.describe("File viewer (/showme) @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Viewer Showme Test", working_dir: wd },
+        data: { name: "Viewer Showme Test", working_dir: wd, backend: "claude-code" },
       });
       expect(sessRes.ok()).toBeTruthy();
 

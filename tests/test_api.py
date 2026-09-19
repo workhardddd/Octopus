@@ -182,12 +182,17 @@ async def test_archive_session_not_found(client):
 
 
 @pytest.mark.asyncio
-async def test_create_session_defaults_backend_to_claude_code(client):
+async def test_create_session_inherits_its_agents_engine(client):
+    """A session created without an explicit engine takes its agent's — and a
+    fresh install seeds the system agent on the *default* kind, not on whatever
+    the SQL column default happens to be."""
+    from server.harness import DEFAULT_BACKEND
+
     resp = await client.post(
         "/api/sessions", headers=HEADERS, json={"name": "Default Backend"}
     )
     assert resp.status_code == 201
-    assert resp.json()["backend"] == "claude-code"
+    assert resp.json()["backend"] == DEFAULT_BACKEND
 
 
 @pytest.mark.asyncio
@@ -258,8 +263,12 @@ async def test_session_info_reports_the_steering_capability(client):
     # An unknown backend must not claim a capability it can't honour.
     assert _can_steer("nonsense-backend") is False
 
+    # Steered through the session's own engine: pinned rather than inherited,
+    # because this asserts the capability plumbing, not what the default is.
     res = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Steerable"}
+        "/api/sessions",
+        headers=HEADERS,
+        json={"name": "Steerable", "backend": "claude-code"},
     )
     assert res.status_code == 201
     assert res.json()["can_steer"] is True

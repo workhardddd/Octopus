@@ -69,10 +69,16 @@ async def test_auth_required(client):
 
 
 @pytest.mark.asyncio
-async def test_default_agent_backend_is_claude(client):
+async def test_default_agent_backend_is_the_default_kind(client):
+    """A fresh install seeds its first agent on the *default* engine. The SQL
+    column default is still 'claude-code' — so pre-existing rows keep working —
+    which is exactly why the seed writes the column out instead of leaning on
+    it: leaving it implicit put a new install's first agent on Claude Code."""
+    from server.harness import DEFAULT_BACKEND
+
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     system = next(a for a in agents if a["is_system"])
-    assert system["backend"] == "claude-code"
+    assert system["backend"] == DEFAULT_BACKEND
 
 
 @pytest.mark.asyncio

@@ -758,12 +758,17 @@ class Database:
         if row is None:
             default_id = uuid.uuid4().hex[:12]
             now = datetime.now(timezone.utc).isoformat()
+            # `backend` is written out rather than left to the column default:
+            # the SQL default stays 'claude-code' so pre-existing rows keep
+            # working, which would otherwise make a *fresh* install seed its
+            # first agent on an engine that is no longer the default kind
+            # (dsh-harness.md §3.8).
             await self._conn.execute(
                 "INSERT INTO agents "
-                "(id, name, description, system_prompt, mcp_servers, "
+                "(id, name, description, system_prompt, mcp_servers, backend, "
                 " is_system, created_at, updated_at) "
-                "VALUES (?, 'Octo', '', '', ?, 1, ?, ?)",
-                (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now),
+                "VALUES (?, 'Octo', '', '', ?, ?, 1, ?, ?)",
+                (default_id, _DEFAULT_MCP_SERVERS_JSON, DEFAULT_BACKEND, now, now),
             )
         else:
             default_id = row[0]

@@ -144,7 +144,9 @@ async function createSessionWithDir(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { name, working_dir: workingDir },
+    // Stated, not inherited: this spec drives a real turn and the suite's
+    // real-CLI dependency is `claude` (CLAUDE.md).
+    data: { name, working_dir: workingDir, backend: "claude-code" },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();

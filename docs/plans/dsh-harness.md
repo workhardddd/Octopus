@@ -38,6 +38,14 @@ differed from the sketch above, and what is verified:
     forever. A real dangling id reports `Invalid params: session is not
     resumable: <id>`, which matched none of the four patterns written from the
     docs — the recovery would have been a silent no-op.
+- **The seeded agent follows the default kind** — found by watching a real
+  install, fixed afterwards: the system-agent seed INSERT omitted `backend`, so a
+  fresh install put its *first* agent (the "Octo" you actually chat with) on the
+  SQL column default, `claude-code`, while §3.8 says new agents default to dsh.
+  New agents already did; the seeded one does now. In the same pass every test
+  that drives a real turn **states** its engine instead of inheriting it — the
+  e2e helpers and the real-CLI suites — so the default can move without silently
+  re-pointing them at a different credential.
 - **Verified as far as this box allows**: pytest 1118 passed / 42 skipped / 0
   failed (Linux container; the 42 are its absent CLIs and `DEEPSEEK_API_KEY`),
   vitest 200/200, `tsc --noEmit` clean, Playwright's `:fast` bucket 41/41, and
