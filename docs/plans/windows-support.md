@@ -133,41 +133,44 @@ container: **1127 passed / 42 skipped / 0 failed**.
 - **Windows** (this machine, system Python, no shim): `import server.main`
   succeeds; the server boots and serves the built SPA on `:8000`;
   `/api/backends` → `["dsh","claude-code","codex"]`; the real group-reaping test
-  passes (a grandchild dies with its group); `test_harness_core.py` +
-  `test_bg_tasks.py` + `test_proc.py` green apart from the two documented
-  POSIX-only skips; **Playwright's `:fast` bucket 41/41** in a real browser
-  against a real backend started by the config above — which includes the mocked
-  DSH credential dialog.
-- **Linux container**: the full suite, nothing skipped beyond the CLI gates.
+  passes (a grandchild dies with its group); **the whole non-`*_real` suite runs
+  natively — 1117 passed / 14 skipped / 0 failed**; **Playwright's `:fast` bucket
+  41/41** in a real browser against a real backend started by the config above —
+  which includes the mocked DSH credential dialog.
+- **Linux container**: the full suite — 1127 passed / 42 skipped / 0 failed —
+  nothing skipped beyond the CLI gates and the two documented POSIX-only ones.
 
 ## 7. What this defers
 
-Genuine deferrals — work that needs a decision, a design, or a host this one is
-not. **The Python suite is green on Linux and has a known tail on Windows**:
-running everything except the `*_real.py` suites natively gives 1114 passed / 3
-skipped / **13 failed**, every one of them a Windows premise rather than a
-Windows bug (they pass on Linux). Grouped, with what each needs:
+Genuine deferrals — work that needs a decision or a design. **The Python suite is
+green on both platforms now**: everything except the `*_real.py` suites runs
+natively on Windows at 1117 passed / 14 skipped / **0 failed**, and in the Linux
+container at 1127 passed / 42 skipped / 0 failed of 1169.
 
-- **A symlink privilege this host does not have** (4: three icon/traversal guards  in `test_applications.py`, one in `test_file_viewer.py`). `os.symlink` fails
+The 11 Windows skips are each a *platform premise the test cannot express*, not a
+bug, and each states it in its own `reason`:
+
+- **A symlink privilege this host does not have** (4: three icon/traversal guards
+  in `test_applications.py`, one in `test_file_viewer.py`). `os.symlink` fails
   with `WinError 1314` unless the process is elevated or Developer Mode is on, so
-  the symlink-escape guards cannot be exercised at all here. Needs a
-  capability-skip (`can_we_symlink()`), the way the CLI gates skip.
+  the guard cannot be exercised here at all — a capability skip through
+  `tests/capabilities.py::can_symlink()`, the same shape as the CLI gates.
 - **Applications' backend scripts** (4 in `test_applications.py`).
   `start.sh`/`install.sh` are executed directly, which Windows cannot do for a
   `.sh` — it would need the POSIX shell from §2 plus a decision about shebangs —
   and `os.access(path, os.X_OK)` is an existence check there, so "declared by an
-  *executable* script" has no Windows meaning. Everything else in Applications
-  works.
-- **A test that isolates `$HOME`** (2: `test_agent_memory`,
-  `test_session_duplicate`). Windows' `os.path.expanduser("~")` reads
-  `USERPROFILE`, not `HOME`, so those tests resolve to the developer's real
-  profile — and write into it (`~/.octopus/fork/…`), which is how the tail was
-  found. Needs a `USERPROFILE` mirror wherever `HOME` is monkeypatched.
+  *executable* script" has no Windows meaning. **This one is a real product gap,
+  tracked as its own decision**; everything else in Applications works.
 - **A POSIX premise in the test itself** (3): `test_subprocess_path` asserts the
   POSIX fallback dirs (`~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`);
   the two `test_fork_native_copy` cases use Claude Code's POSIX project layout
-  (`~/.claude/projects/-x-y`) and a directory-vs-file trick that Windows'
-  `unlink` refuses before the OSError the test wants.
+  (`~/.claude/projects/-x-y`) and pin the POSIX project-slug encoding, which is
+  not the same string on Windows.
+
+Two more were *bugs in the tests*, fixed rather than skipped: tests that isolated
+`$HOME` resolved to the developer's real profile on Windows (which reads
+`USERPROFILE`) and wrote into it — `~/.octopus/fork/…`, `~/.claude/projects/…`.
+`tests/capabilities.py::isolate_home` sets both, and every such test uses it now.
 
 Also deferred:
 

@@ -27,6 +27,7 @@ from server.file_viewer import (
 )
 from server.main import app
 from server.session_manager import session_manager
+from tests.capabilities import can_symlink
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -87,6 +88,11 @@ def test_rejects_absolute_path_outside_root(tmp_path):
         resolve_safe_path(tmp_path, str(tmp_path.parent / "elsewhere.txt"))
 
 
+@pytest.mark.skipif(
+    not can_symlink(),
+    reason="this host cannot create symlinks (Windows needs Developer Mode or "
+    "elevation) — windows-support.md §7",
+)
 def test_rejects_symlink_escaping_root(tmp_path):
     outside_root = tmp_path / "outside"
     outside_root.mkdir()

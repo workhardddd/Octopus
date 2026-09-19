@@ -18,6 +18,7 @@ from server.harness.events import HarnessEvent
 from server import session_manager as sm
 from server.session_manager import ForkError, QueuedPrompt, SessionManager
 from server.delegations import DelegationRunState, delegation_manager
+from tests.capabilities import isolate_home
 from tests.fake_run import FakeRunBase
 
 
@@ -119,7 +120,7 @@ async def test_codex_fork_resume_id_null_survives_restart(manager):
 
 @pytest.mark.asyncio
 async def test_fork_m0_empty(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     parent = await _seed_parent(manager, backend="claude-code")
     fork = await manager.fork_session(parent.id, 0)
     assert fork.fork_after_seq == -1
@@ -446,7 +447,7 @@ def _git(cwd, *args):
 
 @pytest.mark.asyncio
 async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -483,7 +484,7 @@ async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fork_with_revert_refused_non_git(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     wd = tmp_path / "plain"
     wd.mkdir()
     agent = await manager.db.get_system_agent()

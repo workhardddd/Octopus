@@ -38,6 +38,7 @@ from server.applications import (
 )
 from server.config import settings
 from server.database import Database
+from tests.capabilities import can_symlink
 from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
@@ -153,6 +154,11 @@ def test_resolve_within_blocks_traversal(tmp_path):
     assert resolve_within(str(base), "a/b/../../../secret.txt") is None
 
 
+@pytest.mark.skipif(
+    not can_symlink(),
+    reason="this host cannot create symlinks (Windows needs Developer Mode or "
+    "elevation) — windows-support.md §7",
+)
 def test_resolve_within_blocks_escaping_symlink(tmp_path):
     base = tmp_path / "app"
     base.mkdir()
@@ -783,6 +789,11 @@ async def test_static_traversal_is_a_404(client, tmp_path):
         assert "top secret" not in resp.text, path
 
 
+@pytest.mark.skipif(
+    not can_symlink(),
+    reason="this host cannot create symlinks (Windows needs Developer Mode or "
+    "elevation) — windows-support.md §7",
+)
 @pytest.mark.asyncio
 async def test_static_refuses_a_symlink_out_of_the_app(client, tmp_path):
     created = await _api_create(client, name="Linked")
@@ -895,6 +906,11 @@ def test_remote_icon_is_not_adopted(tmp_path):
     assert discover_icon_src(d, "index.html") is None
 
 
+@pytest.mark.skipif(
+    not can_symlink(),
+    reason="this host cannot create symlinks (Windows needs Developer Mode or "
+    "elevation) — windows-support.md §7",
+)
 def test_icon_escaping_the_app_dir_is_rejected(tmp_path):
     """Same guard as the static route: `..` and symlinks pointing out are
     refused, so an app can't nominate a file it was never given."""
@@ -1072,6 +1088,12 @@ def _script(app_dir: str, name: str, body: str, executable: bool = True) -> None
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="'executable' has no Windows meaning — os.access(X_OK) is an "
+    "existence check there — so the declaration rule under test cannot be "
+    "expressed; windows-support.md §7",
+)
 def test_a_backend_is_declared_by_an_executable_start_script(tmp_path):
     """Presence of `start.sh` IS the declaration — there is no manifest. A
     non-executable one reports as absent rather than being run, so a forgotten
@@ -1118,6 +1140,11 @@ def test_data_and_runtime_are_siblings_not_subdirectories(tmp_path):
         assert not d.startswith(app + os.sep)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="starts a real start.sh, which Windows cannot execute directly — "
+    "windows-support.md §7",
+)
 @pytest.mark.asyncio
 async def test_a_real_backend_answers_through_the_proxy(client):
     """The whole feature, end to end: an application ships `start.sh`, Octopus
@@ -1191,6 +1218,11 @@ async def test_proxy_is_404_when_the_app_has_no_backend(client):
     assert "no backend" in resp.text.lower()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="starts a real start.sh, which Windows cannot execute directly — "
+    "windows-support.md §7",
+)
 @pytest.mark.asyncio
 async def test_proxy_reports_a_broken_backend_rather_than_hanging(client):
     """A backend that exits immediately is a 503 naming the reason, not a 500
@@ -1222,6 +1254,11 @@ async def test_proxy_requires_auth(client):
     assert resp.status_code == 401
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="starts a real start.sh, which Windows cannot execute directly — "
+    "windows-support.md §7",
+)
 @pytest.mark.asyncio
 async def test_deleting_an_application_stops_its_backend(client):
     """A running server must not outlive its application. Nothing points at it
