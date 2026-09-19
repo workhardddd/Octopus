@@ -54,7 +54,9 @@ async def _new(
 async def test_create_session(manager):
     session = await _new(manager,"Test Session", "/tmp")
     assert session.name == "Test Session"
-    assert session.working_dir == "/tmp"
+    # The stored path is normalized to an absolute one, so compare against this
+    # platform's spelling of the same directory (Windows: `D:\tmp`).
+    assert session.working_dir == os.path.abspath("/tmp")
     assert session.status == SessionStatus.idle
     assert len(session.id) == 12
     assert session.id in manager.sessions
@@ -73,22 +75,26 @@ async def test_create_session_default_dir(manager):
 
 
 @pytest.mark.asyncio
-async def test_resolve_working_dir_is_absolute_and_cwd_independent(monkeypatch):
+async def test_resolve_working_dir_is_absolute_and_cwd_independent(tmp_path, monkeypatch):
     """A relative working_dir is resolved to absolute once; an already-absolute
     one is returned unchanged regardless of the process cwd — so the derived
     Claude project slug can't shift when the server runs from a different
     directory (e.g. a cloud deployment with a different pwd)."""
     from server.session_manager import resolve_working_dir
 
+    here = str(tmp_path)
+    other = str(tmp_path / "elsewhere")
+    os.makedirs(other, exist_ok=True)
+
     # Absolute input is stable no matter the cwd.
-    monkeypatch.chdir("/tmp")
-    assert resolve_working_dir("/srv/project") == "/srv/project"
-    monkeypatch.chdir("/")
-    assert resolve_working_dir("/srv/project") == "/srv/project"
+    monkeypatch.chdir(here)
+    assert resolve_working_dir(other) == other
+    monkeypatch.chdir(other)
+    assert resolve_working_dir(other) == other
 
     # Relative input resolves against the current cwd at call time.
-    monkeypatch.chdir("/tmp")
-    assert resolve_working_dir("proj") == str(Path("/tmp/proj"))
+    monkeypatch.chdir(here)
+    assert resolve_working_dir("proj") == str(Path(here) / "proj")
     assert os.path.isabs(resolve_working_dir("."))
 
 
@@ -174,7 +180,7 @@ async def test_initialize_restores_sessions():
         restored = mgr2.get_session(sid)
         assert restored is not None
         assert restored.name == "Restored"
-        assert restored.working_dir == "/tmp"
+        assert restored.working_dir == os.path.abspath("/tmp")
         assert restored.status == SessionStatus.idle
     finally:
         await db.close()
@@ -1302,7 +1308,7 @@ async def test_archive_creates_new_session_with_same_settings(manager):
 
     assert new.id != old.id
     assert new.name == "Work"
-    assert new.working_dir == "/tmp/work"
+    assert new.working_dir == os.path.abspath("/tmp/work")
     assert new.credential_id == "c-1"
     # Brand-new conversation — no resume id, no message history.
     assert new.claude_session_id is None
@@ -2350,6 +2356,32 @@ async def test_a_message_with_attachments_is_never_steered():
     sess = _steerable_session(mgr)
     queued = QueuedPrompt(prompt="look at this", attachment_ids=["a1"])
     assert await mgr._try_steer(sess, queued) is False
+
+
+async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypatch):
+    """A turn that dies before the steering window opens must surface *its*
+    failure. Cleanup used to read an unbound `steer_writer` and replace the real
+    error with `UnboundLocalError` — so the user saw that instead of "the CLI
+    could not be started", and the cause was missing from the logs too."""
+    session = await _new(manager, "StartFails")
+
+    class _ExplodingStart(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            raise RuntimeError("the CLI could not be started")
+
+        def stream(self):
+            async def _gen():
+                yield  # pragma: no cover — never reached
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _ExplodingStart())
+
+    with pytest.raises(RuntimeError, match="could not be started"):
+        async for _ in manager._run_backend(session, "go"):
+            pass
 
 
 async def test_writer_delivers_steers_and_persists_them_after_the_write():

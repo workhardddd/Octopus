@@ -2229,6 +2229,12 @@ class SessionManager:
             # never hang forever the way the deep-research wedge did.
             watchdog_state = {"last": time.monotonic(), "tripped": None}
             watchdog = self._start_turn_watchdog(backend, watchdog_state)
+            # The steering window's writer, opened below once the turn is
+            # actually running. Declared *here* because the `finally` closes it
+            # even when the turn never got that far: a failure to start would
+            # otherwise read an unbound local in cleanup and replace the real
+            # error with `UnboundLocalError` (inline-steering.md §8).
+            steer_writer: asyncio.Task[int] | None = None
 
             try:
                 if reused is not None:
@@ -2249,7 +2255,6 @@ class SessionManager:
                 # input channel can be steered; everything else — including a
                 # protocol backend that happily reuses its process — keeps
                 # queueing.
-                steer_writer: asyncio.Task[int] | None = None
                 if backend.can_steer:
                     async with session._steer_lock:
                         session._steer_open = True

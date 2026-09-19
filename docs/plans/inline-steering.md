@@ -1,5 +1,11 @@
 # Inline steering — and the turn latency that pays for it
 
+> **Fixed 2026-09-19:** the writer task's variable was declared *inside* the
+> turn's `try`, but closed in its `finally` — so a turn that never got that far
+> (a `backend.start()` failure, a cancel) died in cleanup with
+> `UnboundLocalError` instead of surfacing its own error, and the real cause
+> never reached the logs. Declared before the `try` now, with a regression test.
+
 > **Implementation status: ALL THREE STAGES SHIPPED.** Three staged
 > changes (§4). Every CLI behaviour and every number below is *measured*
 > against our own `claude 2.1.272`, not assumed.
