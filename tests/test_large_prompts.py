@@ -199,7 +199,11 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
     try:
         await mgr.initialize(db)
         agent = await db.get_system_agent()
-        session = await mgr.create_session(agent["id"], name="Huge")
+        # The engine is stated, not inherited: this drives a turn through a
+        # fake, and the default kind (dsh) refuses to run without a credential.
+        session = await mgr.create_session(
+            agent["id"], name="Huge", backend="claude-code"
+        )
 
         received_prompts: list[str] = []
 

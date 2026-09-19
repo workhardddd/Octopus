@@ -2164,6 +2164,15 @@ class SessionManager:
         agent = await self._load_agent(session)
         harness = get_harness(session.backend)
         credential = await self._resolve_credential(session, agent, harness)
+        # An engine that cannot fall back to a host login must say so *before*
+        # anything is spawned. Without this, DSH starts, takes the prompt and
+        # ends the turn with no answer at all — the turn looks like the app
+        # silently did nothing (found in a real trial).
+        if credential is None and harness.profile.credential_required:
+            yield await self._surface_missing_credential(
+                session, backend=harness.backend
+            )
+            return
         # The effective credential id (session override, else the agent's).
         # Used to flag the right row needs_reconnect on a mid-turn 401
         # (harness-credential-reauth.md §4). None = host-default CLI auth.
@@ -2592,48 +2601,54 @@ class SessionManager:
             # once) — leave it alone.
             if saw_result:
                 return
-            if not harness.premature_exit_recovery:
-                # Harness opts out of the Claude-CLI premature-exit recovery
-                # (Codex runs exactly once per turn) — codex-backend.md §5.6.
-                return
-            if recovery_attempts >= self._MAX_RECOVERY_ATTEMPTS:
-                logger.warning(
-                    "Session %s: CLI premature-exit retry budget exhausted; "
-                    "giving up on this turn", session.id
+            if (
+                harness.premature_exit_recovery
+                and saw_tool_use
+                and session.claude_session_id
+            ):
+                if recovery_attempts >= self._MAX_RECOVERY_ATTEMPTS:
+                    logger.warning(
+                        "Session %s: CLI premature-exit retry budget exhausted; "
+                        "giving up on this turn", session.id
+                    )
+                else:
+                    recovery_attempts += 1
+                    logger.warning(
+                        "Session %s: detected CLI premature-exit after tool_use; "
+                        "auto-respawning with 'continue' (attempt %d/%d)",
+                        session.id, recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
+                    )
+                    # Persist a discreet system marker so the UI / transcript
+                    # records that a recovery happened. Uses the same shape as
+                    # the (interrupted by user) marker in interrupt().
+                    marker = MessageContent(
+                        role=MessageRole.system,
+                        type="error",
+                        content="(auto-resumed after CLI exited mid-turn)",
+                    )
+                    marker_seq = await self._persist_message(session, marker)
+                    marker_event: dict[str, Any] = {
+                        "type": "error",
+                        "session_id": session.id,
+                        "message": "(auto-resumed after CLI exited mid-turn)",
+                    }
+                    if marker_seq is not None:
+                        marker_event["seq"] = marker_seq
+                    yield marker_event
+
+                    current_prompt = "continue"
+                    continue
+
+            # Nothing recovered it, so *say so*. A turn that produced no result
+            # and no recognisable error used to fall out of here in silence:
+            # the status flipped back to idle and the user was left staring at
+            # their own message. Found in a real trial — a DSH agent with no API
+            # key starts, accepts the prompt, and ends the turn with nothing.
+            if turn_failed:
+                yield await self._surface_turn_failed(
+                    session, backend=harness.backend, detail=error_blob
                 )
-                return
-            if not saw_tool_use:
-                return
-            if not session.claude_session_id:
-                # No resume id captured (init never arrived) — we can't
-                # respawn into the same conversation.
-                return
-
-            recovery_attempts += 1
-            logger.warning(
-                "Session %s: detected CLI premature-exit after tool_use; "
-                "auto-respawning with 'continue' (attempt %d/%d)",
-                session.id, recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
-            )
-            # Persist a discreet system marker so the UI / transcript
-            # records that a recovery happened. Uses the same shape as
-            # the (interrupted by user) marker in interrupt().
-            marker = MessageContent(
-                role=MessageRole.system,
-                type="error",
-                content="(auto-resumed after CLI exited mid-turn)",
-            )
-            marker_seq = await self._persist_message(session, marker)
-            marker_event: dict[str, Any] = {
-                "type": "error",
-                "session_id": session.id,
-                "message": "(auto-resumed after CLI exited mid-turn)",
-            }
-            if marker_seq is not None:
-                marker_event["seq"] = marker_seq
-            yield marker_event
-
-            current_prompt = "continue"
+            return
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
         """Fetch the session's owning agent row (or None for legacy/no-DB)."""
@@ -3274,7 +3289,7 @@ class SessionManager:
         )
         return new_ts.access_token
 
-    _BACKEND_DISPLAY = {"claude-code": "Claude Code", "codex": "Codex"}
+    _BACKEND_DISPLAY = {"claude-code": "Claude Code", "codex": "Codex", "dsh": "DSH"}
 
     def _start_turn_watchdog(
         self, backend: HarnessRun, state: dict[str, Any]
@@ -3455,6 +3470,79 @@ class SessionManager:
             "session_id": session.id,
             "message": human,
             "code": "transient_retry",
+        }
+        if seq is not None:
+            event["seq"] = seq
+        return event
+
+    async def _surface_missing_credential(
+        self, session: Session, *, backend: str
+    ) -> dict[str, Any]:
+        """Refuse a turn on an engine that cannot run without a credential.
+
+        Claude and Codex fall back to their CLI's own login, so "nothing
+        attached" is a normal state for them. DSH has no such fallback: it
+        starts, accepts the prompt and ends the turn with no answer, which a
+        user cannot tell apart from a broken app. Say what to do instead.
+        """
+        display = self._BACKEND_DISPLAY.get(backend, backend)
+        human = (
+            f"{display} runs on an API key and none is attached — add a "
+            "credential for it on the Harness page, then attach it to this "
+            "agent (or pick one for this session)."
+        )
+        seq = await self._persist_message(
+            session,
+            MessageContent(
+                role=MessageRole.system, type="error", content=human, is_error=True
+            ),
+        )
+        event: dict[str, Any] = {
+            "type": "error",
+            "session_id": session.id,
+            "message": human,
+            "code": "credential_required",
+        }
+        if seq is not None:
+            event["seq"] = seq
+        return event
+
+    async def _surface_turn_failed(
+        self, session: Session, *, backend: str, detail: str = ""
+    ) -> dict[str, Any]:
+        """Report a turn that ended with no result and no error the classifier
+        recognised.
+
+        The engine can die anywhere — a rejected key, a crash, a protocol
+        mismatch — and everything downstream of that used to `return` in
+        silence: the status flipped back to idle and the user was left looking
+        at their own message with no explanation at all. Whatever we know goes
+        into the message; the raw tail goes to the log.
+        """
+        display = self._BACKEND_DISPLAY.get(backend, backend)
+        human = (
+            f"The {display} backend ended the turn without an answer and without "
+            "reporting why. Check the credential attached to this agent, then "
+            "try again."
+        )
+        if detail.strip():
+            logger.warning(
+                "Session %s: %s ended a turn with no result — %s",
+                session.id,
+                backend,
+                detail.strip()[:2000],
+            )
+        seq = await self._persist_message(
+            session,
+            MessageContent(
+                role=MessageRole.system, type="error", content=human, is_error=True
+            ),
+        )
+        event: dict[str, Any] = {
+            "type": "error",
+            "session_id": session.id,
+            "message": human,
+            "code": "turn_no_result",
         }
         if seq is not None:
             event["seq"] = seq

@@ -303,6 +303,10 @@ DSH = RuntimeProfile(
     # The premature-exit-after-tool-roundtrip respawn is a Claude-CLI bug
     # workaround; DSH has no such failure mode to recover from.
     premature_exit_recovery=False,
+    # DSH authenticates with an API key and nothing else — there is no CLI
+    # login to fall back to, so a turn with no credential is refused rather
+    # than spawned into a silent no-op (§3.8).
+    credential_required=True,
     auth_error_patterns=_DSH_AUTH_ERROR_PATTERNS,
     transient_error_patterns=_DSH_TRANSIENT_ERROR_PATTERNS,
     stale_session_patterns=_DSH_STALE_SESSION_PATTERNS,

@@ -1180,12 +1180,22 @@ async def test_run_backend_bounds_recovery_to_single_retry(manager):
     assert invocations[0]["prompt"] == "go"
     assert invocations[1]["prompt"] == "continue"
 
-    # Events from both invocations are surfaced, with the recovery
-    # marker between them. No final `result` event since the recovery
-    # also failed — the turn just ends.
+    # Events from both invocations are surfaced, with the recovery marker
+    # between them. The recovery failed too, so the turn *reports* that it
+    # ended with no answer rather than just stopping — silence here is what
+    # left a real user staring at their own message
+    # (test_a_turn_that_ends_with_no_result_says_so).
     types = [m["type"] for m in ws_msgs]
-    assert types == ["tool_use", "tool_result", "error", "tool_use", "tool_result"]
+    assert types == [
+        "tool_use",
+        "tool_result",
+        "error",
+        "tool_use",
+        "tool_result",
+        "error",
+    ]
     assert ws_msgs[2]["message"] == "(auto-resumed after CLI exited mid-turn)"
+    assert ws_msgs[5]["code"] == "turn_no_result"
 
 
 @pytest.mark.asyncio
@@ -2382,6 +2392,72 @@ async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypat
     with pytest.raises(RuntimeError, match="could not be started"):
         async for _ in manager._run_backend(session, "go"):
             pass
+
+
+async def test_a_turn_that_ends_with_no_result_says_so(manager, monkeypatch):
+    """An engine can die without emitting a `result` and without anything the
+    error classifiers recognise. That used to return in silence — status back to
+    idle, nothing persisted, nothing broadcast, the user left staring at their
+    own message (found in a real trial: a DSH agent with no API key starts,
+    takes the prompt, and ends the turn with nothing)."""
+    session = await _new(manager, "NoResult")
+
+    class _DiesQuietly(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            pass
+
+        def stream(self):
+            async def _gen():
+                return
+                yield  # pragma: no cover — an engine that ends with nothing
+
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _DiesQuietly())
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "turn_no_result"
+    # Persisted too, so a reload shows the same thing rather than a blank turn.
+    stored = await manager.db.load_messages(session.id)
+    assert [m["type"] for m in stored] == ["error"]
+
+
+async def test_an_engine_that_needs_a_credential_is_refused_before_it_spawns(
+    manager, monkeypatch
+):
+    """DSH authenticates with a key and has no CLI login to fall back to, so a
+    turn with nothing attached must not spawn an engine that cannot answer —
+    and must say what to attach."""
+    session = await _new(manager, "NeedsKey", backend="dsh")
+    spawned: list[str] = []
+
+    class _NeverStarts(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            spawned.append("start")
+
+        def stream(self):
+            async def _gen():
+                return
+                yield  # pragma: no cover — never reached
+
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _NeverStarts())
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert spawned == [], "the engine must not be spawned without a credential"
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "credential_required"
+    assert "API key" in events[0]["message"]
 
 
 async def test_writer_delivers_steers_and_persists_them_after_the_write():

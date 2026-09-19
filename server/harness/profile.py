@@ -321,6 +321,14 @@ class RuntimeProfile:
     # out is to drop the id and start a fresh engine-side conversation, which
     # `SessionManager._run_backend` does exactly once per turn.
     stale_session_patterns: tuple[str, ...] = ()
+    # Whether a turn can run *at all* with no credential attached. Claude and
+    # Codex fall back to whatever login their CLI already holds (or a host
+    # default config dir), so for them "nothing attached" is normal. DSH
+    # authenticates with an API key and nothing else: with none it starts,
+    # accepts the prompt, and ends the turn with no answer — which the user
+    # cannot tell apart from a broken app. The turn is refused up front instead
+    # (dsh-harness.md §3.8).
+    credential_required: bool = False
     # Whether the composed system prompt should carry the agent-memory blurb
     # (docs/plans/memory.md §3). Codex: True (no native memory — it reads/
     # writes the canonical dir with file tools by instruction). Claude: False

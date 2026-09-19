@@ -662,6 +662,7 @@ and the real-CLI Claude/Codex suites.
 | 8. handoff/pull | unsupported (`can_export`/`can_import` False) | Claude-JSONL product; DSH's own format is Zstd-framed and cwd-bound |
 | 9. Sandbox | none (unfenced) | ADR 0001 |
 | 10. Web leaf | works, via a second restricted spawn profile | tool policy is not per-turn; the patch may only disable tool rows — disabling an injected **service** row keeps `dsh` from booting at all, with a bare `Internal error` and empty stderr |
+| 11. Credential | **required** — a turn with none is refused up front | ACP is key-authenticated: there is no CLI login to fall back to the way `claude`/`codex` have. Without the check, DSH starts, accepts the prompt and ends the turn with **no answer and no error** — found in a real trial, and made visible in the same change (`RuntimeProfile.credential_required`) |
 
 ## 11. What this defers
 
