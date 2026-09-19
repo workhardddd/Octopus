@@ -92,10 +92,11 @@ def bg_run(command: str, description: str | None = None) -> str:
     the follow-up turn and is not free.
 
     Args:
-        command: The shell command to run. Executed under `/bin/sh -c`
-            with cwd = session working_dir. Use full shell syntax
-            (pipes, redirects, &&) freely. Subprocess output is capped
-            at 200 KB per stream (truncated from start when over).
+        command: The shell command to run. Executed under a POSIX
+            shell (`sh -c`) with cwd = session working_dir. Use full
+            shell syntax (pipes, redirects, &&) freely. Subprocess
+            output is capped at 200 KB per stream (truncated from
+            start when over).
         description: Optional one-line label shown in the UI chip and
             in the follow-up turn (e.g. "running pytest"). The model
             should include this for any task it expects to outlast

@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # that the server streams back under /apps/{id}/. `~` expanded at use
     # time so tests (and the e2e suite) can point it at a temp root.
     applications_dir: str = "~/.octopus/applications"
+    # DSH homes (docs/plans/dsh-harness.md §3.5). DSH reads ONE `DSH_HOME` per
+    # process — sessions, settings, credentials, profiles and its user-global
+    # instruction file all live under it — so each agent gets
+    # `<dsh_home_dir>/agents/<agent_id>/` and its own `dsh` usage on this
+    # machine stays out of Octopus's. The pre-warmed profile workspace is
+    # shared at `<dsh_home_dir>/profiles`. `~` expanded at use time.
+    dsh_home_dir: str = "~/.octopus/dsh"
 
     # Dev mode (enables uvicorn reload)
     debug: bool = False

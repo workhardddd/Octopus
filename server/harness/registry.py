@@ -12,8 +12,11 @@ from .harness import Harness
 
 _REGISTRY: dict[str, Harness] = {}
 
-# The default backend when a kind isn't specified (legacy rows / tests).
-DEFAULT_BACKEND = "claude-code"
+# The default backend when a kind isn't specified: what a new agent or session
+# runs on, and the kind `/api/backends` always lists. DSH became the default
+# when it landed (dsh-harness.md §3.8); claude-code and codex stay selectable,
+# and rows that already name them are untouched.
+DEFAULT_BACKEND = "dsh"
 
 
 def register(harness: Harness) -> None:

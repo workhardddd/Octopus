@@ -382,7 +382,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
           credential_id: prev?.credential_id ?? null,
           agent_id: prev?.agent_id ?? null,
           origin: prev?.origin ?? "user",
-          backend: prev?.backend ?? "claude-code",
+          backend: prev?.backend ?? "dsh",
           can_fork: prev?.can_fork ?? true,
           // Carried from the session it replaces: same agent, same backend,
           // so the same harness capability.

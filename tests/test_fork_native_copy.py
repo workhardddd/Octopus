@@ -7,21 +7,29 @@ rewrite + fallback + cleanup — for both backends. Real CLI copy->resume->recal
 lives in test_fork_native_copy_real.py (gated)."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from server.harness.events import HarnessCredential
+from tests.capabilities import isolate_home
 from server.harness import claude_code as cc
 from server.harness import codex as cx
 
 
 # ----------------------------------------------------------------- Claude
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="pins Claude Code's POSIX project-slug encoding (/tmp/... → "
+    "-tmp-...); Windows' spelling of the same transform is not pinned here — "
+    "windows-support.md §7",
+)
 def test_claude_project_slug_matches_cli(monkeypatch, tmp_path):
     # Pin the slug to the REAL CLI behavior (verified by the gated real test):
     # every non-alphanumeric char -> '-', case preserved, runs NOT collapsed.
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     base = tmp_path / ".claude" / "projects"
     cases = {
@@ -52,7 +60,7 @@ def _write_claude_transcript(base_home, working_dir, sid):
 
 @pytest.mark.asyncio
 async def test_claude_fork_copy_rewrites_and_resumes(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     parent_wd, dest_wd = "/proj/parent", "/home/u/.octopus/fork/parent-abc"
     _write_claude_transcript(tmp_path, parent_wd, "pid-1")
@@ -74,7 +82,7 @@ async def test_claude_fork_copy_rewrites_and_resumes(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_claude_fork_copy_fallback_when_no_transcript(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     # No parent resume id → replay fallback.
     art = await cc._fork_copy(
@@ -90,11 +98,17 @@ async def test_claude_fork_copy_fallback_when_no_transcript(tmp_path, monkeypatc
     assert art2.needs_replay is True
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="arranges a directory where a file is expected to force the OSError "
+    "the cleanup must re-raise; Windows refuses the setup itself (WinError 183) "
+    "before the behaviour under test is reached — windows-support.md §7",
+)
 @pytest.mark.asyncio
 async def test_claude_fork_cleanup_reraises_on_oserror(tmp_path, monkeypatch):
     # A real removal failure (not "already gone") must RE-RAISE so the saga
     # keeps the row for a retry instead of stranding the transcript (Vera).
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     dest_wd = "/x/y"
     d = cc._claude_project_dir(dest_wd)
@@ -106,7 +120,7 @@ async def test_claude_fork_cleanup_reraises_on_oserror(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_claude_fork_cleanup_removes_copy(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     dest_wd = "/home/u/.octopus/fork/x-1"
     d = cc._claude_project_dir(dest_wd)

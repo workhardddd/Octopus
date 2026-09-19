@@ -6,9 +6,17 @@ prepends the per-user install dirs so the child resolves node."""
 
 import os
 
+import pytest
+
 from server.harness.run import _fallback_path_dirs, augmented_path
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the fallback dirs emulate a POSIX service PATH (~/.local/bin, "
+    "Homebrew, the POSIX nvm layout) and the assertions are written as POSIX "
+    "path lists — windows-support.md §7",
+)
 def test_augmented_path_prepends_extra_then_fallbacks_then_base():
     p = augmented_path(base="/usr/bin:/bin", extra_dir="/opt/foo/bin")
     parts = p.split(os.pathsep)

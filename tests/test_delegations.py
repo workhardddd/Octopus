@@ -23,6 +23,8 @@ captured prompts are what matters.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -509,7 +511,9 @@ async def test_start_delegation_happy_path(dm, mgr, db, monkeypatch):
     assert sid == rec.delegation_id
     assert "Octo" in prompt  # default system agent's name
     assert "review the dashboard" in prompt
-    assert "web/src/Dashboard.tsx" in prompt
+    # Rendered with this platform's separator (`web\src\Dashboard.tsx` on
+    # Windows), so build the expectation the same way the code does.
+    assert os.path.join("web", "src", "Dashboard.tsx") in prompt
 
 
 @pytest.mark.asyncio

@@ -90,7 +90,7 @@ def test_mcp_entry_shape():
     }
     entry = c.mcp_entry(inst, callback_env)
     assert entry["command"] == sys.executable
-    assert entry["args"] == ["-m", "server.mcp_servers.connectors.dummy"]
+    assert entry["args"] == ["-P", "-m", "server.mcp_servers.connectors.dummy"]
     # Shared callback env is preserved and the installation id is injected.
     assert entry["env"]["OCTOPUS_API_BASE"] == "http://127.0.0.1:8765"
     assert entry["env"]["OCTOPUS_INSTALLATION_ID"] == inst.id

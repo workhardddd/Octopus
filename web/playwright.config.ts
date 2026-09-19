@@ -17,6 +17,16 @@ export const E2E_APPLICATIONS_DIR = path.join(
   "octopus-e2e-applications"
 );
 
+// The interpreter the e2e backend runs on: the project venv by default, or
+// whatever `OCTOPUS_E2E_PYTHON` names. Quoted because a Windows path usually
+// contains spaces (Program Files).
+const E2E_PYTHON = `"${
+  process.env.OCTOPUS_E2E_PYTHON ??
+  (process.platform === "win32"
+    ? ".venv\\Scripts\\python.exe"
+    : ".venv/bin/python")
+}"`;
+
 export default defineConfig({
   testDir: "./e2e",
   testIgnore: ["telegram-bridge.spec.ts"],
@@ -46,8 +56,11 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command:
-        "cd .. && .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8765",
+      // POSIX checkouts keep the venv at `.venv/bin`; a Windows one puts the
+      // same interpreter under `.venv\Scripts`. A dev box that installs the
+      // dependencies globally (no venv, or no PyPI access to build one) points
+      // `OCTOPUS_E2E_PYTHON` at that interpreter instead.
+      command: `cd .. && ${E2E_PYTHON} -m uvicorn server.main:app --host 0.0.0.0 --port 8765`,
       port: 8765,
       reuseExistingServer: true,
       timeout: 10_000,

@@ -1,11 +1,12 @@
 # Octopus Architecture
 
-**Octopus is a personal agent platform.** It turns the local **Claude Code**
-and **Codex** CLIs into durable, always-on agents you reach from a browser,
-your phone, or Telegram. It drives the `claude` / `codex` CLIs directly via
-their stream-JSON protocols — there is **no `claude-code-sdk` dependency** and
-no extra per-token API cost beyond the CLI's own auth (your subscription or an
-attached API key).
+**Octopus is a personal agent platform.** It turns local agent CLIs —
+**DSH (DeepSeek Harness)**, **Claude Code** and **Codex** — into durable,
+always-on agents you reach from a browser, your phone, or Telegram. It drives
+the CLIs directly: `dsh` over ACP, `claude` / `codex` over their stream-JSON
+protocols. There is **no SDK dependency** in any case — not
+`claude-code-sdk`, not an ACP client library — and no extra per-token API cost
+beyond the CLI's own auth (a subscription, or an attached API key).
 
 This doc describes the *current* system design. Per-initiative design history
 lives in [`plans/`](plans/); CLI/stream-protocol research notes live in the
@@ -31,11 +32,11 @@ the data model — this doc describes it conceptually rather than pasting SQL.
         │        ┌──────▼───────┐            │
         │        │   Harness    │            │  RuntimeProfile per backend kind
         │        └──────┬───────┘            │
-        └───────────────┼────────────────────┘
-                        │ subprocess (stream-JSON over stdout)
+        ┌───────────────┼────────────────────┐
+                        │ subprocess (ACP, or stream-JSON over stdout)
             ┌───────────┴────────────┐
-            │  claude --print …      │   or   codex exec --json …
-            │  + injected MCP servers│        (bg · ask · connectors)
+            │  dsh --profile acp     │   or   claude --print …  /  codex exec --json …
+            │  + injected MCP servers│        (bg · ask · ask_agent · connectors)
             └────────────────────────┘
                         │
             ┌───────────┴───────────┐
@@ -60,15 +61,17 @@ In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 ## The agent model
 
 An **Agent** is the durable definition of an assistant: name/avatar, system
-prompt, model, default backend (`claude-code` | `codex`), an attached credential,
-its MCP/tool set, tool allow/deny policy, and enabled connectors. Agents **own**
-their Sessions, Schedules, and bridge bindings. A protected **Default Agent**
-("Octo", `is_system=1`) always exists.
+prompt, model, default backend (`dsh` | `claude-code` | `codex`), an attached
+credential, its MCP/tool set, tool allow/deny policy, and enabled connectors.
+Agents **own** their Sessions, Schedules, and bridge bindings. A protected
+**Default Agent** ("Octo", `is_system=1`) always exists.
 
 - A **Session** is one conversation thread (an instance of talking to an agent).
-  It carries the backend resume id, working dir, origin (`user` | `schedule` |
-  `bridge` | `delegation`), an optional `parent_session_id` (set when the
-  session was spawned by another agent via `mcp__ask_agent__ask` — see
+  It carries the backend resume id (a DSH session id, a Claude session id or a
+  Codex thread id), working dir, origin (`user` | `schedule` | `bridge` |
+  `delegation` | `fork` | `application` | `app`), an optional
+  `parent_session_id` (set when the session was spawned by another agent via
+  `mcp__ask_agent__ask` — see
   [`plans/agent-collaboration.md`](plans/agent-collaboration.md)), and an
   `archived` flag.
 - `SessionManager` reads the owning agent's config *directly each turn*, so
@@ -116,14 +119,15 @@ The harness is the **only** place that talks to a model runtime. There is one
 | File | Purpose |
 |---|---|
 | `harness.py` | The `Harness` front door (one per backend kind). |
-| `profile.py` | `RuntimeProfile` — the per-backend data record + small collaborators (argv builder, event parser, capability flags). Capabilities (e.g. native memory, premature-exit recovery) are derived from the profile. |
-| `run.py` | `HarnessRun` — universal subprocess + JSONL stream engine (4 MiB line limit, graceful shutdown, PATH discovery incl. nvm). |
+| `profile.py` | `RuntimeProfile` — the per-backend data record + small collaborators (argv builder, event parser, a `TerminalProtocol` when the runtime's stdio carries a conversation, filesystem hooks, capability flags). Capabilities (e.g. native memory, steering, export) are derived from the profile. |
+| `run.py` | `HarnessRun` — universal subprocess engine (4 MiB line limit, graceful shutdown, PATH discovery incl. nvm). It owns the pipe and the response correlation; how stdio is *driven* comes from the profile (`StdinMode`: prompt-in-argv, raw JSON user frames, or a request/response protocol). |
 | `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
+| `dsh.py` + `dsh_acp.py` | DSH profile — `dsh --profile acp` for turns (driven by a hand-written ACP v1 client) and `dsh --profile headless` for one-shots; the per-agent `DSH_HOME` + generated patch live in `server/dsh_home.py`. See [`plans/dsh-harness.md`](plans/dsh-harness.md). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
 | `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Runs exactly once per turn. |
-| `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
-| `login.py` | `LoginDriver` protocol for in-app credential login flows. |
+| `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `DEFAULT_BACKEND` — `dsh` — is always listed) and `DEFAULT_BACKEND` itself. |
+| `login.py` | `LoginDriver` protocol for in-app credential login flows. DSH has none: its credential is a pasted API key. |
 
 ### In-app MCP servers (`server/mcp_servers/`)
 
@@ -413,16 +417,13 @@ migrations (never re-create or duplicate the schema in docs).
 ## Memory
 
 Each agent gets one canonical markdown dir, `<agents_dir>/<id>/memory/`, shared
-by both backends (design: [`plans/memory.md`](plans/memory.md)):
+by every backend (design: [`plans/memory.md`](plans/memory.md)):
 
-- **Claude Code** points its auto-memory there via the
-  `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` env var — **not** `CLAUDE_CONFIG_DIR`, so
-  auth and `--resume` transcripts are untouched.
-- **Codex** has no usable native memory in headless `exec`, so the dir is named
-  in an injected `developer_instructions` blurb and the model reads/writes it
-  with ordinary file tools. `CODEX_HOME` is untouched.
+- **Claude Code** points its auto-memory there via the `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` env var — **not** `CLAUDE_CONFIG_DIR`, so auth and `--resume` transcripts are untouched.
+- **Codex** has no usable native memory in headless `exec`, so the dir is named in an injected `developer_instructions` blurb and the model reads/writes it with ordinary file tools. `CODEX_HOME` is untouched.
+- **DSH** reads it natively: the generated patch points its `agent-instructions` row at the dir, and DSH's user-global instruction file name — fixed at `AGENTS.md` — is provided as a view of the canonical `MEMORY.md` (a symlink, or a copy refreshed each spawn where symlinks are unavailable).
 
-Memory is decoupled from both harnesses' config/auth dirs. The dir is
+Memory is decoupled from every harness's config/auth dirs. The dir is
 provisioned on agent create, kept on archive, removed on hard delete.
 
 ## Configuration (`OCTOPUS_*`)
@@ -433,7 +434,7 @@ provisioned on agent create, kept on archive, removed on hard delete.
 | `host` / `port` | `0.0.0.0` / `8000` | Bind address. |
 | `default_working_dir` | `.` | Working dir for new sessions. |
 | `db_path` | `octopus.db` | SQLite file. |
-| `attachments_dir` / `large_prompts_dir` / `agents_dir` / `codex_home_dir` | under `~/.octopus/` | Upload cache · large-prompt spill · agent memory roots · per-credential Codex auth. |
+| `attachments_dir` / `large_prompts_dir` / `agents_dir` / `codex_home_dir` / `dsh_home_dir` | under `~/.octopus/` | Upload cache · large-prompt spill · agent memory roots · per-credential Codex auth · per-agent DSH homes (`dsh_home_dir/agents/<id>/`, with the shared pre-warmed profile workspace at `dsh_home_dir/profiles`). |
 | `enable_tunnel` | `false` | Start a Cloudflare Tunnel. |
 | `telegram_bot_token` / `telegram_allowed_chat_ids` / `telegram_api_base_url` | — | Telegram bridge (enabled when token set). |
 | `ask_user_question_timeout_seconds` | `1800` | Auto-answer an unanswered question (so headless sessions don't wedge). |
@@ -446,9 +447,17 @@ provisioned on agent create, kept on archive, removed on hard delete.
 - **One harness, profiles not subclasses.** All model interaction goes through a
   single `Harness` + `HarnessRun` engine parameterized by a `RuntimeProfile`
   value per backend. Adding a backend is a new profile, not a new class tree.
-- **CLIs, not an SDK.** Octopus spawns `claude --print` / `codex exec --json`
-  and parses their stream-JSON itself (`harness/run.py`), so there's no
-  `claude-code-sdk` dependency and behavior tracks the CLIs directly.
+- **CLIs, not an SDK.** Octopus spawns `dsh` (ACP), `claude --print` and
+  `codex exec --json` and parses their protocols itself, so there is no
+  `claude-code-sdk` and no ACP client dependency — behavior tracks the CLIs
+  directly.
+- **Declared degradations, never silent ones.** A harness that cannot do
+  something says so on its profile (`can_steer`, `can_export`, `can_import`,
+  `web`, `login`, `injects_memory_prompt`), and
+  [`plans/dsh-harness.md`](plans/dsh-harness.md) §10 is the DSH column of that
+  matrix: no token-level streaming, no steering, sub-agent runs as plain tool
+  calls, no `--agents`, no handoff/pull. A missing feature must be explainable
+  without reading the profile.
 - **Agent-centric data model.** Sessions, schedules, and bridge bindings all
   hang off an agent; `SessionManager` reads agent config live each turn, so edits
   take effect on the next turn without restart.
@@ -474,18 +483,30 @@ provisioned on agent create, kept on archive, removed on hard delete.
   [`plans/session-fork.md`](plans/session-fork.md).
 - **Per-turn safety net.** Every harness turn runs with a configurable idle
   timeout (`turn_idle_timeout_seconds`, default 300 s) and an overall cap
-  (`turn_max_seconds`, default 1800 s). The child subprocess is spawned in its
-  own process group (`start_new_session=True`) so `stop()` kills the whole
-  group, not just the direct child. A timed-out turn surfaces a `turn_timeout`
+  (`turn_max_seconds`, default 1800 s). The child subprocess is spawned as its
+  own group leader through `server/proc.py` — `start_new_session` on POSIX,
+  `CREATE_NEW_PROCESS_GROUP` on Windows — so `stop()` kills the whole group, not
+  just the direct child. A timed-out turn surfaces a `turn_timeout`
   error and never enters premature-exit recovery or transient retry. Design:
-  [`plans/turn-safety.md`](plans/turn-safety.md).
+  [`plans/turn-safety.md`](plans/turn-safety.md);
+  [`plans/windows-support.md`](plans/windows-support.md) for the per-platform
+  spelling.
 - **Three-tier failed-turn disposition.** After a turn fails, the run loop
   classifies the error: (1) auth-credential rejection (401/revoked/expired) →
   flag the bound credential `needs_reconnect` and stop — re-auth won't fix
   itself; (2) transient backend error (5xx/overloaded/dropped stream) →
   bounded exponential retry (max 2, resumes from captured session id when
   output was already streamed); (3) everything else (quota/credit/billing) →
-  surface as-is. Classifiers are backend-declared pattern sets in
+  surface as-is. A failure to **start** the turn — a CLI that will not spawn, a
+  resume the engine refuses — takes the same disposition as one that dies
+  mid-stream; it used to escape the run loop entirely, which is how a session
+  whose engine could not resume ended up failing identically on every later turn
+  with nothing but the engine's own words on screen. A turn that ends with **no
+  result and no recognisable error** is reported too rather than just stopping
+  (the report carries the engine's error text, not only a summary). An engine
+  that cannot fall back to a CLI login says so *before* it spawns
+  (`RuntimeProfile.credential_required`: DSH, whose ACP is key-only).
+  Classifiers are backend-declared pattern sets in
   `RuntimeProfile`. Designs: [`plans/harness-credential-reauth.md`](plans/harness-credential-reauth.md)
   and [`plans/harness-transient-retry.md`](plans/harness-transient-retry.md).
 - **Hardened bg pipeline.** Large prompts spill to a file (`E2BIG` guard),
@@ -531,8 +552,8 @@ octopus pull SESSION_ID [--cwd DIR]            # export a session to local JSONL
 ## Tests
 
 ```bash
-.venv/bin/pytest tests/ -v        # 882 backend (real-CLI tests run when claude/codex on PATH)
-cd web && bun run test            # 84 frontend unit (vitest)
+.venv/bin/pytest tests/ -v        # 1158 backend (real-CLI tests gate on their binary + credential)
+cd web && bun run test            # 200 frontend unit (vitest)
 cd web && npx tsc --noEmit        # TypeScript check
-cd web && bun run test:e2e        # 67 Playwright e2e (35 fast UI-only + 32 real-CLI @llm)
+cd web && bun run test:e2e        # 78 Playwright e2e (41 fast UI-only + 37 real-CLI @llm)
 ```

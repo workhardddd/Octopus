@@ -18,7 +18,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import signal
 import socket
 import time
 from collections import deque
@@ -32,6 +31,14 @@ from .applications import (
     runtime_dir_for,
 )
 from .config import settings
+from .proc import (
+    find_posix_shell,
+    kill_group,
+    shell_argv,
+    shell_env_path,
+    spawn_kwargs,
+    terminate_group,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +64,13 @@ INSTALL_TIMEOUT_S = 600.0
 # shouldn't be a workspace with a dozen idle servers.
 IDLE_TIMEOUT_S = 15 * 60.0
 REAP_INTERVAL_S = 60.0
+
+# A backend's scripts are POSIX shell, so a host with no `sh` cannot run one at
+# all: saying that beats a `WinError 193` about a file it never understood.
+_NO_SHELL = (
+    "no POSIX shell found — install.sh and start.sh are POSIX scripts and this "
+    "host has no `sh`; on Windows, installing Git for Windows provides one"
+)
 # Hard cap on concurrently running backends, least-recently-used evicted first.
 MAX_RUNNING = 4
 # Log tail kept in memory for the UI; the full log is on disk.
@@ -85,22 +99,92 @@ def _port_accepts(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def host_env() -> dict[str, str]:
+    """The host facts a backend needs and cannot derive for itself.
+
+    Octopus deliberately does not hand a backend the server's environment — it
+    carries the auth token, credentials and tunnel config (plan §4). But
+    "minimal" has to still mean *usable*: a POSIX-shaped `PATH`/`HOME`/`LANG`
+    leaves Windows tools unable to find their own system root, their temp dirs,
+    or the machine's proxy, and none of that fails loudly. Both of the following
+    were a real app's backend, measured, not hypothetical:
+
+    * Without `SystemRoot`, git's curl could not reach even a *loopback* proxy —
+      `Failed to connect to 127.0.0.1 port 7891` — one variable apart from a
+      working run.
+    * With `HOME` set to a POSIX `/tmp` (the server's own value on Windows),
+      git never read `~/.gitconfig`: no proxy, no CA settings, no credential
+      helper. A `git fetch` then hung on a direct connection to the git host
+      instead of failing, which in the UI looks like a clone that never ends.
+
+    Nothing here is secret: a home directory, a temp directory, and the proxy
+    the machine already uses. The token is still not in this dict, which is what
+    the exclusion test pins.
+    """
+    env: dict[str, str] = {}
+    if os.name == "nt":
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if home:
+            # Both, and consistently: Windows tools resolve the profile from
+            # `USERPROFILE`, git prefers `HOME` when it is set, and a mismatch
+            # is how one of them ends up looking in a directory that is not the
+            # user's.
+            env["HOME"] = home
+            env["USERPROFILE"] = os.environ.get("USERPROFILE") or home
+        system_root = os.environ.get("SystemRoot") or os.environ.get("windir")
+        if system_root:
+            env["SystemRoot"] = system_root
+            env["windir"] = os.environ.get("windir") or system_root
+        # Where a tool writes scratch files. Without these, one that cannot find
+        # a temp dir falls back to its working directory — the app's code
+        # directory, which Octopus publishes as static files.
+        for var in ("TEMP", "TMP", "COMSPEC", "PATHEXT"):
+            value = os.environ.get(var)
+            if value:
+                env[var] = value
+    # A machine that reaches the network through a proxy says so in its
+    # environment; a backend that must make an outbound request has no other way
+    # to learn it, and no way to say it failed. Only these four, and only when
+    # set — never `os.environ.copy()`, which is what keeps the secrets out.
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"):
+        for spelling in (var, var.lower()):
+            value = os.environ.get(spelling)
+            if value:
+                env[spelling] = value
+                break
+    return env
+
+
 def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[str, str]:
     """The environment a backend script runs with.
 
     Deliberately NOT `os.environ.copy()`. The server's environment holds the
     Octopus auth token, credential material and tunnel config; a backend has no
     business seeing any of it, and inheriting it wholesale is invisible until
-    it isn't (plan §4).
+    it isn't (plan §4). What the host *does* have to contribute is in
+    `host_env()`.
     """
+    host = host_env()
     env = {
+        **host,
         "APP_ID": app_id,
         "APP_DIR": app_dir,
         "APP_DATA_DIR": data_dir_for(app_dir),
         "APP_RUNTIME_DIR": runtime_dir_for(app_dir),
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
+        # `host.get` first: on Windows the machine's home comes from
+        # `USERPROFILE`, and the server's own `HOME` may be absent (or a POSIX
+        # `/tmp`, which is not a place a Windows tool can look for its config).
+        "HOME": host.get("HOME") or os.environ.get("HOME") or "/tmp",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        # Windows' own idea of where Windows is. `PATH`/`HOME`/`LANG` alone are a
+        # POSIX-shaped environment, and the POSIX shell shipped with Git (MSYS2)
+        # needs this one to resolve `%SystemDrive%`: without it the literal string
+        # becomes a *relative* path, and the shell recreates
+        # `%SystemDrive%\ProgramData\Microsoft\Windows\Caches` inside the app's
+        # code directory on every install. Harmless-looking, but it lands in the
+        # directory Octopus publishes as static files.
+        "SystemDrive": os.environ.get("SystemDrive", ""),
         # How a backend talks to the Octopus agents (app-agent-access.md §4).
         # The token is scoped to this one application, so handing it to app
         # code doesn't hand over Octopus; the URL is the loopback origin, not
@@ -108,6 +192,12 @@ def script_env(app_id: str, app_dir: str, *, port: int | None = None) -> dict[st
         "OCTOPUS_AGENT_API": f"http://127.0.0.1:{settings.port}/apps/{app_id}/agent",
         "OCTOPUS_APP_TOKEN": app_scope_token(app_id),
     }
+    # The shell's own bin dirs go ahead of PATH: Git for Windows ships the
+    # coreutils a script reaches for (`sleep`, `grep`, `sed`, `git`) next to
+    # `sh` and off the machine PATH, so an `install.sh` using one would exit 127.
+    shell = find_posix_shell()
+    if shell is not None:
+        env["PATH"] = shell_env_path(shell, env["PATH"])
     if port is not None:
         env["PORT"] = str(port)
     return env
@@ -214,14 +304,23 @@ class BackendSupervisor:
         self._log(st, "--- install.sh ---")
         os.makedirs(runtime_dir_for(app_dir), exist_ok=True)
         os.makedirs(data_dir_for(app_dir), exist_ok=True)
+        # Run it *under the POSIX shell*, never exec the `.sh` directly: Windows
+        # cannot start one (WinError 193), and on POSIX this is the same thing
+        # with one fewer thing to get wrong (`proc.shell_argv`).
+        argv = shell_argv(script)
+        if argv is None:
+            st.state = FAILED
+            st.error = _NO_SHELL
+            self._log(st, st.error)
+            return False
         try:
             proc = await asyncio.create_subprocess_exec(
-                script,
+                *argv,
                 cwd=app_dir,
                 env=script_env(app_id, app_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
+                **spawn_kwargs(),
             )
         except OSError as exc:
             st.state = FAILED
@@ -233,7 +332,7 @@ class BackendSupervisor:
         try:
             code = await asyncio.wait_for(proc.wait(), timeout=INSTALL_TIMEOUT_S)
         except asyncio.TimeoutError:
-            _kill_group(proc)
+            kill_group(proc)
             st.state = FAILED
             st.error = f"install.sh timed out after {INSTALL_TIMEOUT_S:.0f}s"
             self._log(st, st.error)
@@ -297,9 +396,16 @@ class BackendSupervisor:
         st.port = port
         self._log(st, f"--- start.sh (port {port}) ---")
         os.makedirs(data_dir_for(st.app_dir), exist_ok=True)
+        argv = shell_argv(script)
+        if argv is None:
+            st.state = FAILED
+            st.error = _NO_SHELL
+            st.failed_at = time.monotonic()
+            self._log(st, st.error)
+            return
         try:
             proc = await asyncio.create_subprocess_exec(
-                script,
+                *argv,
                 cwd=st.app_dir,
                 env=script_env(st.app_id, st.app_dir, port=port),
                 stdout=asyncio.subprocess.PIPE,
@@ -307,7 +413,7 @@ class BackendSupervisor:
                 # Its own group: a backend that spawns children (a git process,
                 # a worker) must not outlive its app, and only a group signal
                 # reaches them.
-                start_new_session=True,
+                **spawn_kwargs(),
             )
         except OSError as exc:
             st.state = FAILED
@@ -369,11 +475,11 @@ class BackendSupervisor:
             st.state = STOPPED
         if proc is None or proc.returncode is not None:
             return
-        _kill_group(proc, signal.SIGTERM)
+        terminate_group(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            _kill_group(proc, signal.SIGKILL)
+            kill_group(proc)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
 
@@ -451,17 +557,6 @@ class BackendSupervisor:
             with contextlib.suppress(Exception):
                 await task
         await self.stop_all()
-
-
-def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:
-    """Signal the child's whole process group.
-
-    `start_new_session=True` made the child a group leader, so this reaches
-    anything it spawned. Signalling just the pid leaves a `git clone` or a
-    worker running with no parent.
-    """
-    with contextlib.suppress(Exception):
-        os.killpg(os.getpgid(proc.pid), sig)
 
 
 backend_supervisor = BackendSupervisor()

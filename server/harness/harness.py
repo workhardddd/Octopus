@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 
+from ..proc import kill_group
 from .events import HarnessOneshotError
 from .login import LoginDriver
 from .profile import OneShotContext, RuntimeProfile
@@ -194,6 +194,11 @@ class Harness:
 
         The profile builds the argv (applying the credential its own way)
         and extracts the result text from stdout."""
+        if self.profile.prepare_oneshot is not None:
+            # The same contract as a turn's `prepare_spawn`: whatever has to
+            # exist on disk before the process starts (DSH's home) is written
+            # here, not while rendering the command.
+            self.profile.prepare_oneshot(ctx)
         argv, kwargs = self.profile.build_oneshot_argv(ctx)
         try:
             argv, kwargs = prepare_spawn(argv, kwargs)
@@ -209,12 +214,10 @@ class Harness:
             )
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
-        from .run import _terminate_process_group
-
         def _reap() -> None:
-            # Kill the whole group (run_oneshot is a session leader via
+            # Kill the whole group (run_oneshot is a group leader via
             # prepare_spawn) so nothing lingers. turn-safety.md §2.
-            _terminate_process_group(proc, signal.SIGKILL)
+            kill_group(proc)
 
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)

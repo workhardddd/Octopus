@@ -496,12 +496,20 @@ class DelegationManager:
         self, parent_session_id: str, *, limit: int = 25
     ) -> list[DelegationRunState]:
         """Recent delegations spawned by a parent session, newest first."""
+        # Ordered by creation, newest first — and *deterministically* so. The
+        # timestamp alone is not enough: two delegations started in the same
+        # clock tick share a `created_at` string, and `sort(reverse=True)`
+        # keeps ties in their original (oldest-first) order, so a same-tick
+        # pair listed the older one first. Sorting ascending and reversing
+        # puts later-inserted records first within a tie, which is the true
+        # creation order (`_records` is insertion-ordered).
         rows = [
             r
             for r in self._records.values()
             if r.parent_session_id == parent_session_id
         ]
-        rows.sort(key=lambda r: r.created_at, reverse=True)
+        rows.sort(key=lambda r: r.created_at)
+        rows.reverse()
         return rows[:limit]
 
     def get_delegation(self, delegation_id: str) -> DelegationRunState | None:

@@ -18,21 +18,42 @@ import json
 import logging
 import os
 import shutil
-import signal
 import uuid as uuid_module
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..proc import kill_group, spawn_kwargs, terminate_group
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
-from .profile import RuntimeProfile, StdinMode, TurnContext
+from .profile import (
+    FrameKind,
+    ParseOutput,
+    RuntimeProfile,
+    StdinMode,
+    TerminalProtocol,
+    TurnContext,
+)
 
 logger = logging.getLogger(__name__)
 
 # Sentinel pushed onto the event queue to signal EOF on the stdout reader.
 _STREAM_END = object()
+
+
+class ProtocolRequestError(RuntimeError):
+    """A `PROTOCOL` request came back as a JSON-RPC error.
+
+    Carries the wire `code`/`message` so a caller (or the turn's error event)
+    can classify it without re-parsing the frame — the same reason
+    `HarnessOneshotError` carries a stable `code`.
+    """
+
+    def __init__(self, code: Any = None, message: str = "") -> None:
+        super().__init__(message or f"protocol error {code}")
+        self.code = code
+        self.message = message or f"protocol error {code}"
 
 # Per-line buffer cap for the asyncio StreamReader wrapping the CLI's
 # stdout. asyncio's 64 KiB default is easily exceeded by a single
@@ -99,36 +120,12 @@ def prepare_spawn(
     env = kwargs.get("env") or os.environ.copy()
     cli_dir = os.path.dirname(argv[0]) if argv and os.path.isabs(argv[0]) else None
     env["PATH"] = augmented_path(env.get("PATH"), cli_dir)
-    # Own process group (session leader) so the whole tree the CLI spawns —
-    # MCP servers, nested subagents (Claude `Task`/Workflow) — is reapable as a
-    # unit via killpg, instead of orphaning on stop()/interrupt()
-    # (turn-safety.md §2). Shared by the streaming engine and run_oneshot.
-    # bg_tasks / codex_login already do this.
-    return argv, {**kwargs, "env": env, "start_new_session": True}
-
-
-def _terminate_process_group(proc: "asyncio.subprocess.Process", sig: int) -> bool:
-    """Signal the whole process group led by `proc` (so nested CLI children die
-    with it), falling back to the direct child if the group can't be resolved.
-    Returns True if a group signal was sent. Idempotent / best-effort —
-    swallows the races where the process already exited (turn-safety.md §2)."""
-    if proc.returncode is not None:
-        return False
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
-    if pgid is not None:
-        try:
-            os.killpg(pgid, sig)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-    try:
-        proc.send_signal(sig)
-    except (ProcessLookupError, PermissionError):
-        pass
-    return False
+    # Own process group (session leader on POSIX, a new process group on
+    # Windows) so the whole tree the CLI spawns — MCP servers, nested
+    # subagents (Claude `Task`/Workflow) — is reapable as a unit, instead of
+    # orphaning on stop()/interrupt() (turn-safety.md §2). Shared by the
+    # streaming engine and run_oneshot. bg_tasks / codex_login already do this.
+    return argv, {**kwargs, "env": env, **spawn_kwargs()}
 
 
 def parse_json_line(line: str) -> dict[str, Any] | None:
@@ -172,6 +169,15 @@ class RunConfig:
     # so an agent that defines some still works on a harness that can't take
     # them (the CLI's built-in sub-agents remain available either way).
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    # DSH's per-agent home and the patch file generated for this spawn
+    # (dsh-harness.md §3.5). None on every other kind; the DSH profile treats
+    # a missing home as a hard error rather than writing into the user's own
+    # `~/.dsh`.
+    dsh_home: str | None = None
+    dsh_patch: str | None = None
+    # The owning agent, when there is one. Neutral, and what a profile derives
+    # its own per-agent paths from.
+    agent_id: str | None = None
 
 
 class HarnessRun:
@@ -182,12 +188,25 @@ class HarnessRun:
         self._profile = profile
         self._config = config or RunConfig()
         self._parser = profile.new_event_parser()
+        # One protocol instance per run: it holds the turn in flight and the
+        # request it is waiting on, so sharing one across runs of a kind would
+        # let two conversations answer each other's frames.
+        self._protocol = profile.new_protocol() if profile.new_protocol else None
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_lines: list[str] = []
         self._stream_closed: bool = False
+        # Requests this run is waiting on a response for, keyed by the id we
+        # sent. Only a `PROTOCOL` run uses it, and only for the calls that must
+        # be awaited *before* a turn can be delivered (the ACP handshake); the
+        # turn itself streams and is settled by its own response frame.
+        self._pending: dict[Any, asyncio.Future[Any]] = {}
+        # The assembled context of the run in flight, kept so the protocol
+        # collaborator can render its handshake from the same neutral inputs
+        # the argv was built from.
+        self._ctx: TurnContext | None = None
         # The uuid of this run's opening prompt frame, remembered so S3 can
         # tell the CLI's echo of our own prompt from a genuine user message.
         #
@@ -250,6 +269,9 @@ class HarnessRun:
             memory_dir=self._config.memory_dir,
             web_research=self._config.web_research,
             subagents=self._config.subagents,
+            dsh_home=self._config.dsh_home,
+            dsh_patch=self._config.dsh_patch,
+            agent_id=self._config.agent_id,
         )
 
     def build_argv(
@@ -277,6 +299,12 @@ class HarnessRun:
             raise RuntimeError("HarnessRun already started")
 
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
+        self._ctx = ctx
+        # A profile that has to write something to run (DSH's per-agent home
+        # and generated patch) does it here, not in `build_argv`: rendering the
+        # command for inspection must stay side-effect free.
+        if self._profile.prepare_spawn is not None:
+            self._profile.prepare_spawn(ctx)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
 
@@ -313,6 +341,15 @@ class HarnessRun:
             # idle: that is what made the CLI stall ~3s per turn waiting for
             # input that wasn't coming (inline-steering.md §10).
             self._initial_uuid = await self.send_user_frame(prompt)
+        else:
+            # PROTOCOL: the conversation is set up before the first prompt
+            # (create or resume the engine-side session, apply its options),
+            # and the session id it yields is what the run persists.
+            protocol = self._require_protocol()
+            session_id = await protocol.handshake(self, ctx)
+            if session_id:
+                self._emit(HarnessEvent(type="session_started", session_id=session_id))
+            self._initial_uuid = await protocol.send_turn(self, prompt)
 
     async def send_user_frame(self, text: str, *, frame_uuid: str | None = None) -> str:
         """Write one user message to the CLI's stdin as a JSON line.
@@ -330,21 +367,94 @@ class HarnessRun:
             raise RuntimeError(
                 f"{self._profile.backend} does not take input on stdin"
             )
-        proc = self._process
-        if proc is None or proc.stdin is None or proc.stdin.is_closing():
-            raise RuntimeError("CLI stdin is not open")
         frame_uuid = frame_uuid or str(uuid_module.uuid4())
-        line = json.dumps(
+        await self.write_frame(
             {
                 "type": "user",
                 "uuid": frame_uuid,
                 "parent_tool_use_id": None,
                 "message": {"role": "user", "content": text},
             }
-        ) + "\n"
-        proc.stdin.write(line.encode())
-        await proc.stdin.drain()
+        )
         return frame_uuid
+
+    # ------------------------------------------------------------------ protocol
+
+    def _require_protocol(self) -> TerminalProtocol:
+        """The run's protocol collaborator, or a loud failure.
+
+        A `PROTOCOL` profile without one is a programming error, not a runtime
+        condition: the engine would have no way to deliver a turn, and falling
+        back to a raw user frame would send a prompt a protocol CLI cannot
+        read.
+        """
+        protocol = self._protocol
+        if protocol is None:
+            raise RuntimeError(
+                f"{self._profile.backend} is a PROTOCOL backend without a "
+                "TerminalProtocol"
+            )
+        return protocol
+
+    async def write_frame(self, obj: dict[str, Any]) -> None:
+        """Write one JSON frame to the CLI's stdin.
+
+        The single write path for everything a run sends: a raw user frame
+        under `STREAM_JSON`, or a request / response / notification under
+        `PROTOCOL`. A failed write is terminal for the turn — if we cannot
+        reach stdin the message has not been delivered, and pretending
+        otherwise would hang the turn waiting for a reply to a prompt that was
+        never sent.
+        """
+        proc = self._process
+        if proc is None or proc.stdin is None or proc.stdin.is_closing():
+            raise RuntimeError("CLI stdin is not open")
+        proc.stdin.write((json.dumps(obj) + "\n").encode())
+        await proc.stdin.drain()
+
+    async def request(self, frame: dict[str, Any]) -> Any:
+        """Write `frame` and await its response, correlated by the id in it.
+
+        Only for calls that must settle *before* the turn can be delivered (a
+        protocol handshake). The turn itself is not awaited: its response is
+        what ends the stream, so a protocol watches for that in `on_response`
+        while events keep streaming.
+        """
+        frame_id = frame["id"]
+        fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._pending[frame_id] = fut
+        try:
+            await self.write_frame(frame)
+        except BaseException:
+            self._pending.pop(frame_id, None)
+            raise
+        return await fut
+
+    def _settle_pending(self, obj: dict[str, Any]) -> None:
+        """Resolve the request waiting on a response frame, if any."""
+        fut = self._pending.pop(obj.get("id"), None)
+        if fut is None or fut.done():
+            return
+        error = obj.get("error") or None
+        if error is None:
+            fut.set_result(obj.get("result"))
+            return
+        fut.set_exception(
+            ProtocolRequestError(error.get("code"), error.get("message", ""))
+        )
+
+    def _fail_pending(self, exc: Exception) -> None:
+        """Fail every request still waiting on a response.
+
+        Used when the pipe can no longer answer — the process exited, or the
+        run is being torn down. A handshake must surface the dead process
+        loudly instead of waiting for a reply the turn watchdog would
+        eventually have to kill.
+        """
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
+        self._pending.clear()
 
     def spawn_signature(
         self, working_dir: str, credential: HarnessCredential | None
@@ -394,8 +504,25 @@ class HarnessRun:
     def reusable(self) -> bool:
         """Whether this backend can serve more than one turn per process.
 
-        Only `STREAM_JSON` can: a backend whose prompt lives in argv is, by
-        construction, one process per turn.
+        A `CLOSE_AFTER_SPAWN` backend cannot — its prompt lives in argv, so it
+        is one process per turn by construction. Both stdin-driven modes can:
+        a `STREAM_JSON` CLI by taking another raw frame, a `PROTOCOL` one by
+        being asked for another turn (inline-steering.md §7,
+        dsh-harness.md §3.6).
+        """
+        return self._profile.stdin_mode in (
+            StdinMode.STREAM_JSON,
+            StdinMode.PROTOCOL,
+        )
+
+    @property
+    def can_steer(self) -> bool:
+        """Whether a message can be injected into the turn already running.
+
+        Deliberately narrower than `reusable`: a `PROTOCOL` run serves several
+        turns but takes them one at a time, and has no channel for a raw
+        mid-turn user frame, so a message sent mid-flight queues instead
+        (inline-steering.md §8).
         """
         return self._profile.stdin_mode is StdinMode.STREAM_JSON
 
@@ -417,7 +544,10 @@ class HarnessRun:
         # turn would duplicate messages.
         self._event_queue = asyncio.Queue()
         self._stream_closed = False
-        self._initial_uuid = await self.send_user_frame(prompt)
+        if self._profile.stdin_mode is StdinMode.STREAM_JSON:
+            self._initial_uuid = await self.send_user_frame(prompt)
+        else:
+            self._initial_uuid = await self._require_protocol().send_turn(self, prompt)
 
     async def stream(self) -> AsyncIterator[HarnessEvent]:
         while True:
@@ -448,12 +578,12 @@ class HarnessRun:
                 # (MCP servers, subagents) die too, not just the direct child
                 # (turn-safety.md §2).
                 logger.warning("CLI didn't exit on stdin close, terminating group")
-                _terminate_process_group(proc, signal.SIGTERM)
+                terminate_group(proc)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
                 except asyncio.TimeoutError:
                     logger.warning("CLI didn't exit on SIGTERM, killing group")
-                    _terminate_process_group(proc, signal.SIGKILL)
+                    kill_group(proc)
                     await proc.wait()
 
         for task in (self._stdout_task, self._stderr_task):
@@ -471,14 +601,29 @@ class HarnessRun:
             except asyncio.QueueFull:
                 pass
 
+        # Nothing can answer a request whose process is gone, so fail them
+        # now: a handshake awaiting one must not outlive the run it belongs to.
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.cancel()
+        self._pending.clear()
+
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
 
     async def interrupt(self) -> None:
-        """Best-effort cancel of the in-flight turn. stop() does
-        stdin-close → SIGTERM → SIGKILL escalation, which is sufficient;
-        MCP-server children die with their parent."""
+        """Best-effort cancel of the in-flight turn.
+
+        A protocol gets first refusal: ACP has a cancellation call of its own
+        (`session/cancel`), which lets the runtime settle the turn and persist
+        it instead of being killed mid-flight. Everything else relies on
+        stop()'s stdin-close → SIGTERM → SIGKILL escalation, which is
+        sufficient; MCP-server children die with their parent.
+        """
+        if self._protocol is not None:
+            await self._protocol.cancel(self)
+            return
         await self.stop()
 
     # ------------------------------------------------------------------ helpers
@@ -521,18 +666,53 @@ class HarnessRun:
         obj = parse_json_line(line)
         if obj is None:
             return
-        out = self._parser.parse(obj)
+        # A protocol multiplexes three kinds of frame onto stdout, and they
+        # must be routed before anything reads them as events. The two
+        # frame-on-stdin modes have no protocol and skip this entirely.
+        protocol = self._protocol
+        if protocol is not None:
+            kind = protocol.classify(obj)
+            if kind is FrameKind.RESPONSE:
+                self._settle_pending(obj)
+                answer = await protocol.on_response(
+                    self, obj.get("id"), obj.get("result"), obj.get("error")
+                )
+                await self._dispatch(answer)
+                return
+            if kind is FrameKind.REQUEST:
+                reply = await protocol.on_request(
+                    self,
+                    obj.get("id"),
+                    obj.get("method") or "",
+                    obj.get("params") or {},
+                )
+                await self.write_frame(reply)
+                return
+        await self._dispatch(self._parser.parse(obj))
+
+    async def _dispatch(self, out: ParseOutput) -> None:
+        """Deliver one parse result — to the stream, or to the session when no
+        turn is in flight."""
+        if out.end_of_stream:
+            # A parser that coalesces chunks into one logical event may still
+            # be holding it: the turn's terminal event must come after it,
+            # never before.
+            for event in self._parser.flush().events:
+                await self._emit_event(event)
         for event in out.events:
-            if self._stream_closed and self._idle_handler is not None:
-                # Out of turn: hand it to the session rather than dropping it.
-                try:
-                    await self._idle_handler(event)
-                except Exception:
-                    logger.exception("idle event handler failed")
-            else:
-                self._emit(event)
+            await self._emit_event(event)
         if out.end_of_stream:
             self._close_stream()
+
+    async def _emit_event(self, event: HarnessEvent) -> None:
+        if self._stream_closed and self._idle_handler is not None:
+            # Out of turn: hand it to the session rather than dropping it.
+            try:
+                await self._idle_handler(event)
+            except Exception:
+                logger.exception("idle event handler failed")
+        else:
+            self._emit(event)
 
     async def _read_stdout(self) -> None:
         assert self._process and self._process.stdout
@@ -552,6 +732,10 @@ class HarnessRun:
         except Exception:
             logger.exception("stdout reader crashed")
         finally:
+            # stdout is gone, so nothing can answer a request still in flight.
+            self._fail_pending(
+                ProtocolRequestError(None, "process exited before answering")
+            )
             if not self._stream_closed:
                 self._stream_closed = True
                 try:

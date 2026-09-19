@@ -3,7 +3,7 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import verify_token
-from ..harness import BackendForkNotSupported, StdinMode, get_harness
+from ..harness import DEFAULT_BACKEND, BackendForkNotSupported, StdinMode, get_harness
 from ..models import CreateSessionRequest, DuplicateSessionRequest, ForkSessionRequest, ImportSessionRequest, MessageContent, PendingQuestionInfo, SessionDetail, SessionInfo, SessionStatus, SessionUpdate, SubagentRun
 from ..session_manager import ForkError, fork_info_fields, session_manager
 
@@ -149,7 +149,7 @@ async def create_session(
     backend = (
         req.backend.value
         if req.backend is not None
-        else (agent.get("backend") if agent else None) or "claude-code"
+        else (agent.get("backend") if agent else None) or DEFAULT_BACKEND
     )
     await _check_credential_backend(req.credential_id, backend)
     try:

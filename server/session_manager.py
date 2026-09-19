@@ -23,6 +23,7 @@ from .large_prompts import (
     spill_if_large,
 )
 from .harness import (
+    DEFAULT_BACKEND,
     BackendForkNotSupported,
     HarnessCredential,
     HarnessEvent,
@@ -229,8 +230,8 @@ class Session:
     # transient child spawned by an agent-to-agent ask_agent call
     # (agent-collaboration.md §5.2).
     origin: str = "user"
-    # Which AI backend drives this session ('claude-code' | 'codex').
-    backend: str = "claude-code"
+    # Which AI backend drives this session ('claude-code' | 'codex' | 'dsh').
+    backend: str = DEFAULT_BACKEND
     # Agent-to-agent: parent session that spawned this delegation, or None
     # for every non-delegation session. Used by the delegation listener to
     # route replies/questions/errors back to the parent and by guards to
@@ -1110,7 +1111,7 @@ class SessionManager:
         working_dir: str | None = None,
         credential_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
@@ -1615,6 +1616,15 @@ class SessionManager:
         # row is still gone, which is the user-visible expectation.
         delete_session_attachments(session_id)
         delete_session_large_prompts(session_id)
+        # A harness that keeps its own conversation store drops it here too.
+        # No kind branching: the profile owns its store's lifecycle, the same
+        # way it owns credential cleanup on delete.
+        cleanup = get_harness(session.backend).profile.cleanup_session
+        if cleanup is not None:
+            try:
+                cleanup(session.agent_id, session.claude_session_id)
+            except Exception:
+                logger.exception("harness session cleanup failed for %s", session_id)
         return True
 
     async def _persist_message(
@@ -2154,6 +2164,15 @@ class SessionManager:
         agent = await self._load_agent(session)
         harness = get_harness(session.backend)
         credential = await self._resolve_credential(session, agent, harness)
+        # An engine that cannot fall back to a host login must say so *before*
+        # anything is spawned. Without this, DSH starts, takes the prompt and
+        # ends the turn with no answer at all — the turn looks like the app
+        # silently did nothing (found in a real trial).
+        if credential is None and harness.profile.credential_required:
+            yield await self._surface_missing_credential(
+                session, backend=harness.backend
+            )
+            return
         # The effective credential id (session override, else the agent's).
         # Used to flag the right row needs_reconnect on a mid-turn 401
         # (harness-credential-reauth.md §4). None = host-default CLI auth.
@@ -2205,6 +2224,10 @@ class SessionManager:
             # Terminal-error signal for post-turn auth-expiry classification.
             saw_error_event = False
             error_event_text = ""
+            # Set when the turn could not even start (a CLI that will not spawn,
+            # a resume the engine refuses): there is nothing to stream, so the
+            # attempt goes straight to the failure disposition.
+            start_failed = False
             # Streaming-text coalescing (inline-steering.md §4 S1). The CLI
             # emits one delta per token; forwarding each as its own WS frame
             # would be a frame per token and a React render per token. We
@@ -2219,26 +2242,53 @@ class SessionManager:
             # never hang forever the way the deep-research wedge did.
             watchdog_state = {"last": time.monotonic(), "tripped": None}
             watchdog = self._start_turn_watchdog(backend, watchdog_state)
+            # The steering window's writer, opened below once the turn is
+            # actually running. Declared *here* because the `finally` closes it
+            # even when the turn never got that far: a failure to start would
+            # otherwise read an unbound local in cleanup and replace the real
+            # error with `UnboundLocalError` (inline-steering.md §8).
+            steer_writer: asyncio.Task[int] | None = None
 
             try:
-                if reused is not None:
-                    # The process already holds this conversation, so there is
-                    # no prompt to re-render and no transcript to resume: just
-                    # hand it the next message.
-                    await backend.send_turn(current_prompt)
-                else:
-                    await backend.start(
-                        current_prompt,
-                        session.working_dir,
-                        session.claude_session_id,
-                        credential=credential,
+                # A turn that never starts must take the *same* disposition as
+                # one that dies mid-stream: the classification below is what
+                # knows how to re-flag an auth failure, drop a resume id the
+                # engine refuses, retry a transient blip, or report honestly.
+                # Letting the exception escape instead sent it straight to
+                # `send_message`'s catch-all, which only writes an error bubble —
+                # so a handshake failure had no recovery at all and a session
+                # whose engine could not resume stayed bricked, retrying the
+                # same dead id every turn (found in a trial: two identical
+                # "Internal error" turns in a row).
+                try:
+                    if reused is not None:
+                        # The process already holds this conversation, so there
+                        # is no prompt to re-render and no transcript to resume:
+                        # just hand it the next message.
+                        await backend.send_turn(current_prompt)
+                    else:
+                        await backend.start(
+                            current_prompt,
+                            session.working_dir,
+                            session.claude_session_id,
+                            credential=credential,
+                        )
+                except Exception as exc:  # noqa: BLE001 — classified below
+                    start_failed = True
+                    saw_error_event = True
+                    error_event_text = f"{exc.__class__.__name__}: {exc}"
+                    logger.warning(
+                        "Session %s: the turn failed to start — %s",
+                        session.id,
+                        error_event_text,
                     )
 
                 # The steering window is open from here until `result`
-                # (inline-steering.md §8). Only a backend that takes input on
-                # stdin can be steered; everything else keeps queueing.
-                steer_writer: asyncio.Task[int] | None = None
-                if backend.reusable:
+                # (inline-steering.md §8). Only a backend with a raw mid-turn
+                # input channel can be steered; everything else — including a
+                # protocol backend that happily reuses its process — keeps
+                # queueing.
+                if backend.can_steer and not start_failed:
                     async with session._steer_lock:
                         session._steer_open = True
                         if session._steer_queue:
@@ -2248,7 +2298,10 @@ class SessionManager:
                         name=f"steer-writer-{session.id}",
                     )
 
-                async for event in backend.stream():
+                # Nothing to stream when the start itself failed: go straight to
+                # the disposition, which classifies what came back.
+                events = _no_events() if start_failed else backend.stream()
+                async for event in events:
                     watchdog_state["last"] = time.monotonic()
 
                     # Coalesce token deltas; flush on a timer.
@@ -2575,48 +2628,54 @@ class SessionManager:
             # once) — leave it alone.
             if saw_result:
                 return
-            if not harness.premature_exit_recovery:
-                # Harness opts out of the Claude-CLI premature-exit recovery
-                # (Codex runs exactly once per turn) — codex-backend.md §5.6.
-                return
-            if recovery_attempts >= self._MAX_RECOVERY_ATTEMPTS:
-                logger.warning(
-                    "Session %s: CLI premature-exit retry budget exhausted; "
-                    "giving up on this turn", session.id
+            if (
+                harness.premature_exit_recovery
+                and saw_tool_use
+                and session.claude_session_id
+            ):
+                if recovery_attempts >= self._MAX_RECOVERY_ATTEMPTS:
+                    logger.warning(
+                        "Session %s: CLI premature-exit retry budget exhausted; "
+                        "giving up on this turn", session.id
+                    )
+                else:
+                    recovery_attempts += 1
+                    logger.warning(
+                        "Session %s: detected CLI premature-exit after tool_use; "
+                        "auto-respawning with 'continue' (attempt %d/%d)",
+                        session.id, recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
+                    )
+                    # Persist a discreet system marker so the UI / transcript
+                    # records that a recovery happened. Uses the same shape as
+                    # the (interrupted by user) marker in interrupt().
+                    marker = MessageContent(
+                        role=MessageRole.system,
+                        type="error",
+                        content="(auto-resumed after CLI exited mid-turn)",
+                    )
+                    marker_seq = await self._persist_message(session, marker)
+                    marker_event: dict[str, Any] = {
+                        "type": "error",
+                        "session_id": session.id,
+                        "message": "(auto-resumed after CLI exited mid-turn)",
+                    }
+                    if marker_seq is not None:
+                        marker_event["seq"] = marker_seq
+                    yield marker_event
+
+                    current_prompt = "continue"
+                    continue
+
+            # Nothing recovered it, so *say so*. A turn that produced no result
+            # and no recognisable error used to fall out of here in silence:
+            # the status flipped back to idle and the user was left staring at
+            # their own message. Found in a real trial — a DSH agent with no API
+            # key starts, accepts the prompt, and ends the turn with nothing.
+            if turn_failed:
+                yield await self._surface_turn_failed(
+                    session, backend=harness.backend, detail=error_blob
                 )
-                return
-            if not saw_tool_use:
-                return
-            if not session.claude_session_id:
-                # No resume id captured (init never arrived) — we can't
-                # respawn into the same conversation.
-                return
-
-            recovery_attempts += 1
-            logger.warning(
-                "Session %s: detected CLI premature-exit after tool_use; "
-                "auto-respawning with 'continue' (attempt %d/%d)",
-                session.id, recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
-            )
-            # Persist a discreet system marker so the UI / transcript
-            # records that a recovery happened. Uses the same shape as
-            # the (interrupted by user) marker in interrupt().
-            marker = MessageContent(
-                role=MessageRole.system,
-                type="error",
-                content="(auto-resumed after CLI exited mid-turn)",
-            )
-            marker_seq = await self._persist_message(session, marker)
-            marker_event: dict[str, Any] = {
-                "type": "error",
-                "session_id": session.id,
-                "message": "(auto-resumed after CLI exited mid-turn)",
-            }
-            if marker_seq is not None:
-                marker_event["seq"] = marker_seq
-            yield marker_event
-
-            current_prompt = "continue"
+            return
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
         """Fetch the session's owning agent row (or None for legacy/no-DB)."""
@@ -3034,6 +3093,10 @@ class SessionManager:
             memory_dir=memory_dir,
             fork_note=fork_note,
             subagents=subagents,
+            # Neutral, and the only thing a per-agent harness facility needs:
+            # DSH derives its home, memory view and patch from the agent
+            # (dsh-harness.md §3.5). Every other kind ignores it.
+            agent_id=session.agent_id,
         )
 
     # Refresh the access_token if it expires within this many seconds. A
@@ -3253,7 +3316,7 @@ class SessionManager:
         )
         return new_ts.access_token
 
-    _BACKEND_DISPLAY = {"claude-code": "Claude Code", "codex": "Codex"}
+    _BACKEND_DISPLAY = {"claude-code": "Claude Code", "codex": "Codex", "dsh": "DSH"}
 
     def _start_turn_watchdog(
         self, backend: HarnessRun, state: dict[str, Any]
@@ -3434,6 +3497,84 @@ class SessionManager:
             "session_id": session.id,
             "message": human,
             "code": "transient_retry",
+        }
+        if seq is not None:
+            event["seq"] = seq
+        return event
+
+    async def _surface_missing_credential(
+        self, session: Session, *, backend: str
+    ) -> dict[str, Any]:
+        """Refuse a turn on an engine that cannot run without a credential.
+
+        Claude and Codex fall back to their CLI's own login, so "nothing
+        attached" is a normal state for them. DSH has no such fallback: it
+        starts, accepts the prompt and ends the turn with no answer, which a
+        user cannot tell apart from a broken app. Say what to do instead.
+        """
+        display = self._BACKEND_DISPLAY.get(backend, backend)
+        human = (
+            f"{display} runs on an API key and none is attached — add a "
+            "credential for it on the Harness page, then attach it to this "
+            "agent (or pick one for this session)."
+        )
+        seq = await self._persist_message(
+            session,
+            MessageContent(
+                role=MessageRole.system, type="error", content=human, is_error=True
+            ),
+        )
+        event: dict[str, Any] = {
+            "type": "error",
+            "session_id": session.id,
+            "message": human,
+            "code": "credential_required",
+        }
+        if seq is not None:
+            event["seq"] = seq
+        return event
+
+    async def _surface_turn_failed(
+        self, session: Session, *, backend: str, detail: str = ""
+    ) -> dict[str, Any]:
+        """Report a turn that ended with no result and no error the classifier
+        recognised.
+
+        The engine can die anywhere — a rejected key, a crash, a protocol
+        mismatch — and everything downstream of that used to `return` in
+        silence: the status flipped back to idle and the user was left looking
+        at their own message with no explanation at all. Whatever we know goes
+        into the message; the raw tail goes to the log.
+        """
+        display = self._BACKEND_DISPLAY.get(backend, backend)
+        human = (
+            f"The {display} backend ended the turn without an answer and without "
+            "reporting why. Check the credential attached to this agent, then "
+            "try again."
+        )
+        detail = detail.strip()
+        if detail:
+            # We do have *something* to say — a start failure's exception, the
+            # engine's stderr — and the user is otherwise left guessing. A
+            # bounded amount reaches the bubble; the whole tail goes to the log.
+            human += f"\n\nEngine error: {detail[:600]}"
+            logger.warning(
+                "Session %s: %s ended a turn with no result — %s",
+                session.id,
+                backend,
+                detail[:2000],
+            )
+        seq = await self._persist_message(
+            session,
+            MessageContent(
+                role=MessageRole.system, type="error", content=human, is_error=True
+            ),
+        )
+        event: dict[str, Any] = {
+            "type": "error",
+            "session_id": session.id,
+            "message": human,
+            "code": "turn_no_result",
         }
         if seq is not None:
             event["seq"] = seq
@@ -3955,6 +4096,18 @@ class SessionManager:
             return False
         pending.future.set_result(False)
         return True
+
+
+async def _no_events() -> AsyncIterator[dict[str, Any]]:
+    """An empty event source, for an attempt whose process never started.
+
+    The run loop still iterates so the attempt reaches the failure
+    disposition — that is what classifies a start failure (auth / stale id /
+    transient) and, failing all of those, reports it. Skipping the loop is how
+    the error used to escape unclassified.
+    """
+    return
+    yield {}  # pragma: no cover — unreachable; makes this a generator
 
 
 def _guess_mime(filename: str) -> str:

@@ -6,6 +6,8 @@ fake CLI, so they don't need a real claude/codex binary.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,14 +16,17 @@ import pytest
 
 from server.harness import (
     EventParser,
+    FrameKind,
     Harness,
     HarnessEvent,
     HarnessOneshotError,
     OneShotContext,
     ParseOutput,
+    ProtocolRequestError,
     RunConfig,
     RuntimeProfile,
     StdinMode,
+    TerminalProtocol,
     TurnContext,
     available_backends,
     get_harness,
@@ -169,6 +174,13 @@ async def test_engine_stop_kills_hung_subprocess(tmp_path):
     await asyncio.wait_for(run.stop(), timeout=6.0)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only premise: the fallback dirs emulate a systemd service "
+    "PATH (~/.local/bin, Homebrew, the POSIX nvm layout) and the probe is a "
+    "#!/bin/sh script — Windows has no service PATH to strip and cannot exec a "
+    "shebang script",
+)
 @pytest.mark.asyncio
 async def test_engine_resolves_binary_from_fallback_dir(tmp_path, monkeypatch):
     """A bare binary not on PATH but in ~/.local/bin still resolves (the
@@ -211,7 +223,9 @@ def test_select_mcp_servers_all_by_default():
     assert bg.env["OCTOPUS_SESSION_ID"] == "s"
     ask_agent_entry = next(e for e in entries if e.key == "ask_agent")
     assert ask_agent_entry.env["OCTOPUS_SESSION_ID"] == "s"
-    assert ask_agent_entry.args[-1] == "server.mcp_servers.ask_agent"
+    # `-P` keeps the child's cwd off `sys.path` (mcp_launch test file); the
+    # module name still ends the argv so the harnesses render it unchanged.
+    assert ask_agent_entry.args == ["-P", "-m", "server.mcp_servers.ask_agent"]
 
 
 def test_select_mcp_servers_subset():
@@ -449,64 +463,67 @@ def test_is_transient_error_retries_server_side_throttle():
 # (MCP servers / subagents) are reaped as a unit, not orphaned.
 
 
-def test_prepare_spawn_sets_session_leader():
+def test_prepare_spawn_isolates_the_process_group():
+    """Which kwarg isolates a child's process group is the platform's business
+    (`server/proc.py`); that a turn is isolated at all is not (turn-safety.md
+    §2)."""
     from server.harness.run import prepare_spawn
 
-    _, kwargs = prepare_spawn(["sh", "-c", "true"], {})
-    assert kwargs.get("start_new_session") is True
+    _, kwargs = prepare_spawn([sys.executable, "-c", "true"], {})
+    if os.name == "nt":
+        flags = kwargs.get("creationflags", 0)
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs.get("start_new_session") is True
 
 
 @pytest.mark.asyncio
-async def test_terminate_process_group_reaps_children(tmp_path):
+async def test_kill_group_reaps_children():
     """Killing the group must take down a CHILD the spawned process started —
-    the orphan leak the old direct-child kill() left behind."""
-    import os
-    import signal as _signal
-    from server.harness.run import _terminate_process_group, prepare_spawn
+    the orphan leak a direct-child kill() leaves behind."""
+    import server.proc as proc_mod
+    from server.harness.run import prepare_spawn
 
-    def _alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
-
-    # Parent starts a backgrounded `sleep`, prints its pid, then waits — so the
-    # child shares the parent's new process group.
-    argv, kwargs = prepare_spawn(
-        ["sh", "-c", "sleep 30 & echo $!; wait"], {}
+    # Parent starts a grandchild, prints its pid, then waits — so the child
+    # shares the parent's new process group. Python children rather than
+    # `sh -c "sleep 30 &"`: no shell needed, so the test runs everywhere.
+    script = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(30)\n"
     )
+    argv, kwargs = prepare_spawn([sys.executable, "-c", script], {})
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, **kwargs
     )
     child_pid = int((await proc.stdout.readline()).strip())
-    assert _alive(child_pid)
+    assert proc_mod.pid_alive(child_pid)
 
-    sent_group = _terminate_process_group(proc, _signal.SIGKILL)
+    sent_group = proc_mod.kill_group(proc)
     await proc.wait()
-    for _ in range(50):  # let the kernel reap the child
-        if not _alive(child_pid):
+    for _ in range(100):  # let the OS finish reaping the child
+        if not proc_mod.pid_alive(child_pid):
             break
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
     assert sent_group is True
-    assert not _alive(child_pid), "child process was orphaned, not reaped"
+    assert not proc_mod.pid_alive(child_pid), "child process was orphaned, not reaped"
 
 
 @pytest.mark.asyncio
 async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     """Cancelling a run_oneshot mid-flight must reap its process group, not
     orphan the CLI (Vera review). We spy on the group-kill helper."""
-    import signal as _signal
-    import server.harness.run as run_mod
+    import server.harness.harness as harness_mod
 
-    calls: list[int] = []
-    real = run_mod._terminate_process_group
+    calls: list[str] = []
+    real = harness_mod.kill_group
 
-    def spy(proc, sig):
-        calls.append(sig)
-        return real(proc, sig)
+    def spy(proc):
+        calls.append("kill")
+        return real(proc)
 
-    monkeypatch.setattr(run_mod, "_terminate_process_group", spy)
+    monkeypatch.setattr(harness_mod, "kill_group", spy)
 
     def build_oneshot_argv(ctx):
         return ([sys.executable, "-c", "import time; time.sleep(30)"], {})
@@ -521,7 +538,7 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert _signal.SIGKILL in calls
+    assert calls == ["kill"]
 
 
 # --------------------------------------------------------------------------- #
@@ -634,3 +651,214 @@ def test_spawn_signature_changes_with_anything_baked_in_at_spawn():
     # …and so must the working dir.
     same_cfg = Harness(profile).create_run(RunConfig(**base))
     assert same_cfg.spawn_signature("/elsewhere", None) != ref
+
+
+# --------------------------------------------------------------------------- #
+# stdin as a request/response protocol (dsh-harness.md §3.1)
+# --------------------------------------------------------------------------- #
+
+JSONRPC_CLI = Path(__file__).parent / "_fixtures" / "fake_jsonrpc_cli.py"
+
+
+class _NotificationParser(EventParser):
+    """Maps a runtime notification onto one event, the way a protocol's own
+    EventParser maps its runtime's notifications."""
+
+    def parse(self, obj: dict[str, Any]) -> ParseOutput:
+        if obj.get("method") == "session/update":
+            return ParseOutput(
+                events=[HarnessEvent(type="update", raw=obj.get("params"))]
+            )
+        return ParseOutput()
+
+
+class _ScriptedProtocol(TerminalProtocol):
+    """A minimal protocol: a two-call handshake, one prompt frame per turn, and
+    an answer for whatever the runtime asks back.
+
+    Deliberately not ACP-shaped — this exercises the *engine's* plumbing
+    (routing, correlation, answering), not any one runtime's semantics.
+    """
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self._turn_id: Any = None
+        self.answered: list[tuple[str, dict[str, Any]]] = []
+
+    def _id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    async def handshake(self, run, ctx):
+        await run.request(
+            {"jsonrpc": "2.0", "id": self._id(), "method": "initialize", "params": {}}
+        )
+        result = await run.request(
+            {
+                "jsonrpc": "2.0",
+                "id": self._id(),
+                "method": "session/new",
+                "params": {"cwd": ctx.working_dir},
+            }
+        )
+        return result.get("sessionId")
+
+    async def send_turn(self, run, text):
+        self._turn_id = self._id()
+        await run.write_frame(
+            {
+                "jsonrpc": "2.0",
+                "id": self._turn_id,
+                "method": "session/prompt",
+                "params": {"text": text},
+            }
+        )
+        return str(self._turn_id)
+
+    def classify(self, obj):
+        if "method" in obj:
+            return FrameKind.REQUEST if "id" in obj else FrameKind.EVENT
+        return FrameKind.RESPONSE
+
+    async def on_response(self, run, request_id, result, error):
+        if request_id == self._turn_id:
+            self._turn_id = None
+            return ParseOutput(
+                events=[HarnessEvent(type="result", raw=result)], end_of_stream=True
+            )
+        return ParseOutput()
+
+    async def on_request(self, run, request_id, method, params):
+        self.answered.append((method, params))
+        return {"jsonrpc": "2.0", "id": request_id, "result": {"allow": True}}
+
+
+def _protocol_profile(
+    mode: str = "session", protocol: TerminalProtocol | None = None
+) -> RuntimeProfile:
+    def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
+        return ([sys.executable, str(JSONRPC_CLI), mode], {"cwd": ctx.working_dir})
+
+    # A fresh protocol per run, the same way `new_event_parser` works: a
+    # profile is shared by every run of its kind, so the per-run state (the
+    # turn in flight, the request being awaited) must not live on it.
+    def new_protocol() -> TerminalProtocol:
+        return protocol if protocol is not None else _ScriptedProtocol()
+
+    return RuntimeProfile(
+        backend="fake-protocol",
+        binary=sys.executable,
+        tools_prompt="TOOLS",
+        credential_style="env_secret",
+        premature_exit_recovery=False,
+        stdin_mode=StdinMode.PROTOCOL,
+        new_protocol=new_protocol,
+        build_turn_argv=build_turn_argv,
+        new_event_parser=_NotificationParser,
+        build_oneshot_argv=lambda ctx: ([sys.executable], {}),
+        parse_oneshot_stdout=lambda s: s,
+    )
+
+
+@pytest.mark.asyncio
+async def test_protocol_handshake_publishes_the_session_id_and_routes_frames(tmp_path):
+    """A PROTOCOL run: the handshake yields the engine-side conversation id
+    (published as `session_started`), the three frame kinds are routed apart,
+    the runtime's own request is answered rather than ignored, and the turn's
+    *response* is what settles the stream.
+    """
+    protocol = _ScriptedProtocol()
+    run = Harness(_protocol_profile(protocol=protocol)).create_run()
+    await run.start("hi", str(tmp_path))
+    events = await asyncio.wait_for(_drain(run), timeout=5.0)
+    await run.stop()
+
+    assert [e.type for e in events] == ["session_started", "update", "update", "result"]
+    assert events[0].session_id == "sess-1"
+    # The first update is the runtime's own; the second only exists because the
+    # client answered, so its payload proves the answer reached the CLI.
+    assert events[1].raw == {"seq": 1, "text": "hi"}
+    assert events[2].raw == {"seq": 2, "answer": {"allow": True}}
+    assert protocol.answered == [("ask", {"q": "?"})]
+
+
+@pytest.mark.asyncio
+async def test_protocol_error_response_surfaces_with_its_wire_code(tmp_path):
+    """A JSON-RPC error is a failed request, and its code must survive — the
+    classifications downstream (auth / stale / transient) key on it."""
+    run = Harness(_protocol_profile("error")).create_run()
+    with pytest.raises(ProtocolRequestError) as exc:
+        await run.start("hi", str(tmp_path))
+    assert exc.value.code == -32000
+    await run.stop()
+
+
+@pytest.mark.asyncio
+async def test_protocol_dead_process_fails_a_pending_request(tmp_path):
+    """A CLI that exits before answering must fail the turn loudly instead of
+    leaving it to wait for a reply the watchdog would eventually have to kill.
+    """
+    run = Harness(_protocol_profile("die")).create_run()
+    with pytest.raises(ProtocolRequestError):
+        await asyncio.wait_for(run.start("hi", str(tmp_path)), timeout=5.0)
+    await run.stop()
+
+
+@pytest.mark.asyncio
+async def test_protocol_reuses_the_process_for_the_next_turn(tmp_path):
+    """A protocol run serves several turns from one process: the second turn
+    goes out as another prompt frame, not a respawn."""
+    protocol = _ScriptedProtocol()
+    run = Harness(_protocol_profile(protocol=protocol)).create_run()
+    await run.start("first", str(tmp_path))
+    await asyncio.wait_for(_drain(run), timeout=5.0)
+
+    sent: list[str] = []
+    original = protocol.send_turn
+
+    async def spy(r, text):
+        sent.append(text)
+        return await original(r, text)
+
+    protocol.send_turn = spy  # type: ignore[method-assign]
+    await run.send_turn("second")
+    events = await asyncio.wait_for(_drain(run), timeout=5.0)
+    await run.stop()
+
+    assert sent == ["second"]
+    assert [e.type for e in events] == ["update", "update", "result"]
+
+
+def test_protocol_is_reusable_but_not_steerable():
+    """Process reuse and mid-turn steering are different capabilities: a
+    protocol run takes turns one at a time, so a message sent mid-flight must
+    queue instead of being written into a conversation that isn't reading."""
+    run = Harness(_protocol_profile()).create_run()
+    assert run.reusable is True
+    assert run.can_steer is False
+
+
+def test_stream_json_is_reusable_and_steerable():
+    run = Harness(_stream_profile('{"type":"result"}')).create_run()
+    assert run.reusable is True
+    assert run.can_steer is True
+
+
+def test_argv_backend_is_neither_reusable_nor_steerable():
+    run = Harness(
+        _stream_profile('{"type":"result"}', stdin_mode=StdinMode.CLOSE_AFTER_SPAWN)
+    ).create_run()
+    assert run.reusable is False
+    assert run.can_steer is False
+
+
+@pytest.mark.asyncio
+async def test_protocol_without_a_collaborator_fails_loudly(tmp_path):
+    """A PROTOCOL profile with no protocol is a programming error: falling back
+    to a raw user frame would send a prompt the CLI cannot read."""
+    profile = _protocol_profile()
+    broken = RuntimeProfile(**{**profile.__dict__, "new_protocol": None})
+    run = Harness(broken).create_run()
+    with pytest.raises(RuntimeError, match="without a TerminalProtocol"):
+        await run.start("hi", str(tmp_path))
+    await run.stop()

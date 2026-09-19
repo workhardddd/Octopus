@@ -31,12 +31,22 @@ async def manager():
         await db.close()
 
 
-async def _new(manager, name="S", working_dir=None, credential_id=None, origin="user"):
-    """Create a session under the Default Agent (created by migration)."""
+async def _new(
+    manager, name="S", working_dir=None, credential_id=None, origin="user",
+    backend="claude-code",
+):
+    """Create a session under the Default Agent (created by migration).
+
+    The backend is pinned rather than left to the registry default: these tests
+    exercise claude-code behavior — its premature-exit respawn, its OAuth env
+    vars, its argv — and a test that is *about* the default kind should say so
+    by passing `backend=None`.
+    """
     agent = await manager.db.get_system_agent()
     _create = manager.create_session
     return await _create(
-        agent["id"], name, working_dir, credential_id=credential_id, origin=origin
+        agent["id"], name, working_dir, credential_id=credential_id,
+        origin=origin, backend=backend,
     )
 
 
@@ -44,7 +54,9 @@ async def _new(manager, name="S", working_dir=None, credential_id=None, origin="
 async def test_create_session(manager):
     session = await _new(manager,"Test Session", "/tmp")
     assert session.name == "Test Session"
-    assert session.working_dir == "/tmp"
+    # The stored path is normalized to an absolute one, so compare against this
+    # platform's spelling of the same directory (Windows: `D:\tmp`).
+    assert session.working_dir == os.path.abspath("/tmp")
     assert session.status == SessionStatus.idle
     assert len(session.id) == 12
     assert session.id in manager.sessions
@@ -63,22 +75,26 @@ async def test_create_session_default_dir(manager):
 
 
 @pytest.mark.asyncio
-async def test_resolve_working_dir_is_absolute_and_cwd_independent(monkeypatch):
+async def test_resolve_working_dir_is_absolute_and_cwd_independent(tmp_path, monkeypatch):
     """A relative working_dir is resolved to absolute once; an already-absolute
     one is returned unchanged regardless of the process cwd — so the derived
     Claude project slug can't shift when the server runs from a different
     directory (e.g. a cloud deployment with a different pwd)."""
     from server.session_manager import resolve_working_dir
 
+    here = str(tmp_path)
+    other = str(tmp_path / "elsewhere")
+    os.makedirs(other, exist_ok=True)
+
     # Absolute input is stable no matter the cwd.
-    monkeypatch.chdir("/tmp")
-    assert resolve_working_dir("/srv/project") == "/srv/project"
-    monkeypatch.chdir("/")
-    assert resolve_working_dir("/srv/project") == "/srv/project"
+    monkeypatch.chdir(here)
+    assert resolve_working_dir(other) == other
+    monkeypatch.chdir(other)
+    assert resolve_working_dir(other) == other
 
     # Relative input resolves against the current cwd at call time.
-    monkeypatch.chdir("/tmp")
-    assert resolve_working_dir("proj") == str(Path("/tmp/proj"))
+    monkeypatch.chdir(here)
+    assert resolve_working_dir("proj") == str(Path(here) / "proj")
     assert os.path.isabs(resolve_working_dir("."))
 
 
@@ -164,7 +180,7 @@ async def test_initialize_restores_sessions():
         restored = mgr2.get_session(sid)
         assert restored is not None
         assert restored.name == "Restored"
-        assert restored.working_dir == "/tmp"
+        assert restored.working_dir == os.path.abspath("/tmp")
         assert restored.status == SessionStatus.idle
     finally:
         await db.close()
@@ -920,7 +936,7 @@ async def test_make_run_applies_agent_config(manager):
         tool_allow="Read\nGrep",
         tool_deny="Bash",
     )
-    session = await manager.create_session(aid, name="S")
+    session = await manager.create_session(aid, name="S", backend="claude-code")
     agent = await manager.db.get_agent(aid)
     backend = manager._make_run(session, agent)
     argv, _ = backend.build_argv("hi", session.working_dir, None)
@@ -1164,12 +1180,22 @@ async def test_run_backend_bounds_recovery_to_single_retry(manager):
     assert invocations[0]["prompt"] == "go"
     assert invocations[1]["prompt"] == "continue"
 
-    # Events from both invocations are surfaced, with the recovery
-    # marker between them. No final `result` event since the recovery
-    # also failed — the turn just ends.
+    # Events from both invocations are surfaced, with the recovery marker
+    # between them. The recovery failed too, so the turn *reports* that it
+    # ended with no answer rather than just stopping — silence here is what
+    # left a real user staring at their own message
+    # (test_a_turn_that_ends_with_no_result_says_so).
     types = [m["type"] for m in ws_msgs]
-    assert types == ["tool_use", "tool_result", "error", "tool_use", "tool_result"]
+    assert types == [
+        "tool_use",
+        "tool_result",
+        "error",
+        "tool_use",
+        "tool_result",
+        "error",
+    ]
     assert ws_msgs[2]["message"] == "(auto-resumed after CLI exited mid-turn)"
+    assert ws_msgs[5]["code"] == "turn_no_result"
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1318,7 @@ async def test_archive_creates_new_session_with_same_settings(manager):
 
     assert new.id != old.id
     assert new.name == "Work"
-    assert new.working_dir == "/tmp/work"
+    assert new.working_dir == os.path.abspath("/tmp/work")
     assert new.credential_id == "c-1"
     # Brand-new conversation — no resume id, no message history.
     assert new.claude_session_id is None
@@ -1448,11 +1474,15 @@ class _FakeBackend(FakeRunBase):
     stderr_text, so _run_backend's auth-expiry classifier can be exercised
     without a real CLI subprocess."""
 
-    def __init__(self, events, stderr_text="", reusable=False):
+    def __init__(self, events, stderr_text="", reusable=False, can_steer=None):
         self._events = list(events)
         self.stderr_text = stderr_text
         # Opt-in: whether this stand-in claims its process survives the turn.
         self.reusable = reusable
+        # Steering is a narrower capability than process reuse. A stand-in
+        # that claims reusability is claude-shaped by default (it answers
+        # send_user_frame), so it steers unless a test says otherwise.
+        self.can_steer = reusable if can_steer is None else can_steer
         self.sent_turns: list[str] = []
 
     async def start(self, *args, **kwargs):
@@ -2336,6 +2366,155 @@ async def test_a_message_with_attachments_is_never_steered():
     sess = _steerable_session(mgr)
     queued = QueuedPrompt(prompt="look at this", attachment_ids=["a1"])
     assert await mgr._try_steer(sess, queued) is False
+
+
+async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypatch):
+    """A turn whose process never starts must still *report*, through the same
+    disposition as one that dies mid-stream.
+
+    It used to escape `_run_backend` entirely and land in `send_message`'s
+    catch-all, which writes a bubble and recovers nothing — so a start failure
+    was never classified (no auth re-flag, no stale-id drop, no retry), and a
+    session whose engine could not resume stayed bricked.
+    """
+    session = await _new(manager, "StartFails")
+
+    class _ExplodingStart(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            raise RuntimeError("the CLI could not be started")
+
+        def stream(self):
+            async def _gen():
+                yield  # pragma: no cover — never reached
+
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _ExplodingStart())
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "turn_no_result"
+    # The engine's own words are carried, so the bubble is actionable.
+    assert "could not be started" in events[0]["message"]
+
+
+async def test_a_resume_the_engine_refuses_is_recovered_not_reported(
+    manager, monkeypatch
+):
+    """A resume id the engine will not serve is *classified* like any other
+    failure — the id is dropped, the history replayed and the turn retried —
+    rather than escaping as a bare error.
+
+    Observed for real: a DSH turn killed at its 1800s cap left a session store
+    the engine then answered with a catch-all "Internal error", and every later
+    turn re-tried the same dead id and failed identically.
+    """
+    from server.harness import HarnessCredential, HarnessEvent
+    from server.harness.run import ProtocolRequestError
+
+    session = await _new(manager, "DeadResume", backend="dsh")
+    session.claude_session_id = "dead-resume-id"
+
+    class _RefusesResume(_SeqBackend):
+        async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+            self.started_with = prompt
+            self.started_resume = resume_id
+            if resume_id:
+                raise ProtocolRequestError(
+                    f"session is not resumable: {resume_id} — Internal error"
+                )
+
+    attempt1 = _RefusesResume(events=[])
+    attempt2 = _SeqBackend(
+        events=[
+            HarnessEvent(type="text", content="recovered"),
+            HarnessEvent(type="result", session_id="fresh", is_error=False),
+        ]
+    )
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+
+    async def _cred(*args, **kwargs):
+        return HarnessCredential(backend="dsh", auth_type="api_key", secret="sk-test")
+
+    monkeypatch.setattr(manager, "_resolve_credential", _cred)
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert attempt1.started_resume == "dead-resume-id"
+    assert attempt2.started_resume is None, "the dead id was retried"
+    assert any(e.get("code") == "stale_session" for e in events)
+    assert any(e.get("type") == "assistant_text" for e in events)
+    assert not any(e.get("code") == "turn_no_result" for e in events)
+
+
+async def test_a_turn_that_ends_with_no_result_says_so(manager, monkeypatch):
+    """An engine can die without emitting a `result` and without anything the
+    error classifiers recognise. That used to return in silence — status back to
+    idle, nothing persisted, nothing broadcast, the user left staring at their
+    own message (found in a real trial: a DSH agent with no API key starts,
+    takes the prompt, and ends the turn with nothing)."""
+    session = await _new(manager, "NoResult")
+
+    class _DiesQuietly(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            pass
+
+        def stream(self):
+            async def _gen():
+                return
+                yield  # pragma: no cover — an engine that ends with nothing
+
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _DiesQuietly())
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "turn_no_result"
+    # Persisted too, so a reload shows the same thing rather than a blank turn.
+    stored = await manager.db.load_messages(session.id)
+    assert [m["type"] for m in stored] == ["error"]
+
+
+async def test_an_engine_that_needs_a_credential_is_refused_before_it_spawns(
+    manager, monkeypatch
+):
+    """DSH authenticates with a key and has no CLI login to fall back to, so a
+    turn with nothing attached must not spawn an engine that cannot answer —
+    and must say what to attach."""
+    session = await _new(manager, "NeedsKey", backend="dsh")
+    spawned: list[str] = []
+
+    class _NeverStarts(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            spawned.append("start")
+
+        def stream(self):
+            async def _gen():
+                return
+                yield  # pragma: no cover — never reached
+
+            return _gen()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _NeverStarts())
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    assert spawned == [], "the engine must not be spawned without a credential"
+    assert [e["type"] for e in events] == ["error"]
+    assert events[0]["code"] == "credential_required"
+    assert "API key" in events[0]["message"]
 
 
 async def test_writer_delivers_steers_and_persists_them_after_the_write():

@@ -9,6 +9,8 @@ from typing import Any
 
 import aiosqlite
 
+from .harness.registry import DEFAULT_BACKEND
+
 logger = logging.getLogger(__name__)
 
 # Built-in MCP servers attached to the Default Agent (and the default for
@@ -756,12 +758,17 @@ class Database:
         if row is None:
             default_id = uuid.uuid4().hex[:12]
             now = datetime.now(timezone.utc).isoformat()
+            # `backend` is written out rather than left to the column default:
+            # the SQL default stays 'claude-code' so pre-existing rows keep
+            # working, which would otherwise make a *fresh* install seed its
+            # first agent on an engine that is no longer the default kind
+            # (dsh-harness.md §3.8).
             await self._conn.execute(
                 "INSERT INTO agents "
-                "(id, name, description, system_prompt, mcp_servers, "
+                "(id, name, description, system_prompt, mcp_servers, backend, "
                 " is_system, created_at, updated_at) "
-                "VALUES (?, 'Octo', '', '', ?, 1, ?, ?)",
-                (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now),
+                "VALUES (?, 'Octo', '', '', ?, ?, 1, ?, ?)",
+                (default_id, _DEFAULT_MCP_SERVERS_JSON, DEFAULT_BACKEND, now, now),
             )
         else:
             default_id = row[0]
@@ -897,7 +904,7 @@ class Database:
         credential_id: str | None = None,
         agent_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
@@ -2011,7 +2018,7 @@ class Database:
         system_prompt: str = "",
         model: str | None = None,
         credential_id: str | None = None,
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         mcp_servers: list[str] | None = None,
         tool_allow: str = "",
         tool_deny: str = "",
@@ -2030,7 +2037,7 @@ class Database:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
             (
                 agent_id, name, description, avatar, system_prompt, model,
-                credential_id, backend or "claude-code", servers_json,
+                credential_id, backend or DEFAULT_BACKEND, servers_json,
                 tool_allow, tool_deny, int(bool(is_system)),
                 created_at, updated_at, json.dumps(subagents or []),
             ),

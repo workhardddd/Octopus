@@ -12,7 +12,13 @@ dependencies = [
     "aiosqlite>=0.20",
     "httpx>=0.27",
     "apscheduler>=3.10",
-    "mcp>=1.0",
+    # mcp 2.x renamed FastMCP (`mcp.server.fastmcp` -> `mcp.server.mcpserver`),
+    # which the connector MCP servers import; the pin keeps a fresh install
+    # working until that migration happens.
+    "mcp>=1.0,<2",
+    # crypto.py Fernet-encrypts every stored secret. It was missing from this
+    # list, so a fresh install could not import server.crypto at all.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
