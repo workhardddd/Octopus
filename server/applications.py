@@ -169,7 +169,21 @@ def is_inside_root(path: str) -> bool:
     `rmtree` something outside our own tree."""
     root = os.path.realpath(applications_root())
     target = os.path.realpath(path)
-    return target != root and os.path.commonpath([root, target]) == root
+    return target != root and _within(root, target)
+
+
+def _within(root: str, target: str) -> bool:
+    """Is `target` at or inside `root`? Both are realpaths already.
+
+    `os.path.commonpath` *raises* when the two are not comparable — on Windows a
+    drive-less path (what a traversal probe such as `/` produces) shares no
+    drive with the managed root, which turned a 404 into a 500. Not comparable
+    means not inside.
+    """
+    try:
+        return os.path.commonpath([root, target]) == root
+    except ValueError:
+        return False
 
 
 def is_safe_relative_path(rel_path: str) -> bool:
@@ -192,7 +206,7 @@ def resolve_within(app_dir: str, rel_path: str) -> str | None:
     """
     base = os.path.realpath(app_dir)
     target = os.path.realpath(os.path.join(base, rel_path.lstrip("/")))
-    if target != base and os.path.commonpath([base, target]) != base:
+    if target != base and not _within(base, target):
         return None
     return target
 

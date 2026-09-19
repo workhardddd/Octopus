@@ -46,8 +46,12 @@ export default defineConfig({
   ],
   webServer: [
     {
+      // POSIX checkouts keep the venv at `.venv/bin`; a Windows one puts the
+      // same interpreter under `.venv\Scripts`. Same server, same port.
       command:
-        "cd .. && .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8765",
+        process.platform === "win32"
+          ? "cd .. && .venv\\Scripts\\python.exe -m uvicorn server.main:app --host 0.0.0.0 --port 8765"
+          : "cd .. && .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8765",
       port: 8765,
       reuseExistingServer: true,
       timeout: 10_000,

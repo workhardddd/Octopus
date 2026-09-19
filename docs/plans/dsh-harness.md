@@ -167,9 +167,12 @@ load-bearing ones because they are *not* obvious from the outside:
 - **Not one process serving many sessions** (§3.6).
 - **Not handoff/pull for DSH** — it is a Claude-JSONL product; the third kind
   has `transcript_codec=None`.
-- **Not Windows.** `run.py`'s process-group reaping (`start_new_session`,
-  `os.killpg`, `signal.SIGKILL`) is POSIX-only today; that pre-existing gap is
-  out of scope and unchanged by this plan.
+- **Not Windows** *(superseded 2026-09-19)*: `run.py`'s process-group reaping
+  (`start_new_session`, `os.killpg`, `signal.SIGKILL`) was POSIX-only, which is
+  why this plan left it alone. It has since been made platform-aware in
+  [`windows-support.md`](windows-support.md) — and the import-time
+  `signal.SIGKILL` that made the server unbootable on Windows went with it — so
+  the DSH kind runs on either platform.
 
 ## 3. Design
 
@@ -614,15 +617,15 @@ and the real-CLI Claude/Codex suites.
 - pytest / vitest / `tsc --noEmit` / Playwright all green, with CLAUDE.md's
   counts and real-CLI gate list re-derived. How far that reached on the dev
   machine (Windows, `dsh` installed and keyed): pytest is authoritative in a
-  Linux container — 1118 passed / 42 skipped / 0 failed — vitest 200/200,
-  `tsc --noEmit` clean, Playwright's `:fast` bucket 41/41, and the DSH `@llm`
-  turn green. The remaining 36 `@llm` tests drive `claude`/`codex` and are not
-  runnable here: three modules need POSIX process groups (`os.getpgid`,
-  `signal.SIGKILL`, `start_new_session`) and `playwright.config.ts` starts
-  `.venv/bin/uvicorn`, and separately `claude` streaming collects zero events on
-  Windows — reproduced identically from an untouched worktree of the parent
-  commit, so it is not this branch's. Verifying that bucket needs a POSIX box
-  with both CLIs signed in.
+  Linux container — 1126 passed / 42 skipped / 0 failed of 1168 — vitest
+  200/200, `tsc --noEmit` clean, Playwright's `:fast` bucket 41/41, and the DSH
+  `@llm` turn green. The other 36 `@llm` tests drive `claude`/`codex` and need
+  both signed in. The process-group blocker that used to be part of that answer
+  was fixed afterwards ([`windows-support.md`](windows-support.md)); what is
+  left is that `claude` streaming collects zero events on Windows — reproduced
+  identically from an untouched worktree of the parent commit, so it is not this
+  branch's — and that this checkout has no `.venv`, which the e2e config starts
+  the backend from.
 
 ## 9. Decisions taken (and where they live)
 

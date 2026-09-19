@@ -18,7 +18,6 @@ import asyncio
 import contextlib
 import logging
 import os
-import signal
 import socket
 import time
 from collections import deque
@@ -32,6 +31,7 @@ from .applications import (
     runtime_dir_for,
 )
 from .config import settings
+from .proc import kill_group, spawn_kwargs, terminate_group
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +221,7 @@ class BackendSupervisor:
                 env=script_env(app_id, app_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,
+                **spawn_kwargs(),
             )
         except OSError as exc:
             st.state = FAILED
@@ -233,7 +233,7 @@ class BackendSupervisor:
         try:
             code = await asyncio.wait_for(proc.wait(), timeout=INSTALL_TIMEOUT_S)
         except asyncio.TimeoutError:
-            _kill_group(proc)
+            kill_group(proc)
             st.state = FAILED
             st.error = f"install.sh timed out after {INSTALL_TIMEOUT_S:.0f}s"
             self._log(st, st.error)
@@ -307,7 +307,7 @@ class BackendSupervisor:
                 # Its own group: a backend that spawns children (a git process,
                 # a worker) must not outlive its app, and only a group signal
                 # reaches them.
-                start_new_session=True,
+                **spawn_kwargs(),
             )
         except OSError as exc:
             st.state = FAILED
@@ -369,11 +369,11 @@ class BackendSupervisor:
             st.state = STOPPED
         if proc is None or proc.returncode is not None:
             return
-        _kill_group(proc, signal.SIGTERM)
+        terminate_group(proc)
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
-            _kill_group(proc, signal.SIGKILL)
+            kill_group(proc)
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
 
@@ -451,17 +451,6 @@ class BackendSupervisor:
             with contextlib.suppress(Exception):
                 await task
         await self.stop_all()
-
-
-def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:
-    """Signal the child's whole process group.
-
-    `start_new_session=True` made the child a group leader, so this reaches
-    anything it spawned. Signalling just the pid leaves a `git clone` or a
-    worker running with no parent.
-    """
-    with contextlib.suppress(Exception):
-        os.killpg(os.getpgid(proc.pid), sig)
 
 
 backend_supervisor = BackendSupervisor()

@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
-import signal
+import shutil
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -39,8 +40,97 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .database import Database
+from .proc import kill_group, spawn_kwargs, terminate_group
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PosixShell:
+    """The shell a bg command runs under, and the directories its own tools
+    live in."""
+
+    path: str
+    # Git for Windows keeps `sh` next to its coreutils (sleep, grep, sed …) but
+    # off the machine's PATH, so a command using any of them would exit 127 if
+    # we only knew the shell's path.
+    extra_path_dirs: tuple[str, ...] = ()
+
+
+def find_posix_shell() -> PosixShell | None:
+    """The POSIX shell a bg command runs under, or None when this host has none.
+
+    The shell is not a preference — the model is taught to write POSIX shell
+    syntax, and the tool description says so. On POSIX that is `/bin/sh`. On
+    Windows it is whatever `sh` the host has, which Git for Windows ships but
+    usually does not put on PATH; with none installed the task is refused with
+    an explanation instead of being handed to `cmd.exe`, where most of what the
+    model writes would fail in ways it cannot see.
+    """
+    if os.name != "nt":
+        return PosixShell("/bin/sh")
+
+    candidates: list[str] = []
+    found = shutil.which("sh")
+    if found:
+        candidates.append(found)
+    for base in (
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ):
+        if not base:
+            continue
+        for leaf in ("Git/bin/sh.exe", "Git/usr/bin/sh.exe", "Programs/Git/bin/sh.exe"):
+            candidate = os.path.join(base, *leaf.split("/"))
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
+    if not candidates:
+        return None
+
+    shell = candidates[0]
+    root = _git_install_root(shell)
+    dirs = (
+        [
+            os.path.join(root, *leaf.split("/"))
+            for leaf in ("bin", "usr/bin", "mingw64/bin")
+        ]
+        if root
+        else [os.path.dirname(shell)]
+    )
+    return PosixShell(shell, tuple(d for d in dirs if os.path.isdir(d)))
+
+
+def _git_install_root(shell: str) -> str | None:
+    """The Git install a shell belongs to, if it is one.
+
+    `sh` sits at `<root>/bin/sh.exe` or `<root>/usr/bin/sh.exe`, so the root is
+    the ancestor that has both a `bin` and a `usr/bin` — which is also how we
+    recognise a Git tree rather than some other `sh` on the machine.
+    """
+    current = os.path.dirname(os.path.abspath(shell))
+    for _ in range(3):
+        if os.path.isdir(os.path.join(current, "usr", "bin")) and os.path.isdir(
+            os.path.join(current, "bin")
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def bg_shell_env(shell: PosixShell) -> dict[str, str]:
+    """Our environment, with the shell's own bin dirs ahead of PATH so the tools
+    it ships resolve for the command the model wrote."""
+    env = os.environ.copy()
+    if shell.extra_path_dirs:
+        parts = [*shell.extra_path_dirs]
+        if env.get("PATH"):
+            parts.append(env["PATH"])
+        env["PATH"] = os.pathsep.join(parts)
+    return env
 
 
 # 200 KB per stream is plenty for typical script output without
@@ -148,6 +238,11 @@ class _RunningTask:
         self.stderr_truncated = False
         # Set when cancel_task is called; affects terminal status mapping.
         self.cancel_requested: bool = False
+        # Set by the idle watchdog: it stops a task that produced output and
+        # then went silent. The terminal status must read "interrupted" — which
+        # used to fall out of the negative exit code a POSIX signal leaves, and
+        # Windows has no such convention.
+        self.force_stopped: bool = False
         # The asyncio.Task running the orchestration coroutine; held so
         # shutdown() can cancel it.
         self.task: asyncio.Task[None] | None = None
@@ -237,19 +332,28 @@ class BgTaskManager:
         task_id = _short_id()
         started_at = _now_iso()
 
-        # Spawn through /bin/sh -c so the model can use shell syntax
+        shell = find_posix_shell()
+        if shell is None:
+            raise BgTaskError(
+                "no POSIX shell on this host: a bg command runs under `sh -c`, "
+                "and none was found (on Windows, install Git for Windows)"
+            )
+        # Spawn through a POSIX shell so the model can use shell syntax
         # (pipes, redirects, &&) — same trust model as the SDK's Bash
         # tool. working_dir confines blast radius the same way.
         try:
             proc = await asyncio.create_subprocess_exec(
-                "/bin/sh",
+                shell.path,
                 "-c",
                 command,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=working_dir,
-                start_new_session=True,  # isolate process group so we can SIGTERM cleanly
+                env=bg_shell_env(shell),
+                # Its own group, so the whole command tree can be stopped as a
+                # unit — `bash -c "long_running &"` included (proc.terminate_group).
+                **spawn_kwargs(),
             )
         except Exception as e:
             # Don't even persist a row — the task never existed. The
@@ -423,9 +527,10 @@ class BgTaskManager:
                         rt.record.id, idle_for, IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
                     )
                     # Don't set cancel_requested — this is a force-
-                    # cleanup, not a user cancel. The status mapping
-                    # in finally will land on "interrupted" because
-                    # the proc gets killed by signal.
+                    # cleanup, not a user cancel. force_stopped makes the
+                    # status mapping in finally land on "interrupted"
+                    # without depending on a signal-shaped exit code.
+                    rt.force_stopped = True
                     await self._terminate_proc(rt)
                     return
 
@@ -489,7 +594,10 @@ class BgTaskManager:
             # (|returncode| is the signal number). Tells us whether
             # we should distinguish "interrupted by an outside force"
             # from "the command itself ran and exited non-zero", since
-            # those are very different user-facing things.
+            # those are very different user-facing things. Windows has no
+            # such convention — a console break exits 0xC000013A and
+            # `taskkill` exits 1 — so a stop *we* initiated is recorded on
+            # the task (force_stopped) instead of being read off the code.
             killed_by_signal = exit_code is not None and exit_code < 0
             if rt.cancel_requested:
                 status = "cancelled"
@@ -497,7 +605,7 @@ class BgTaskManager:
                 status = "failed"  # surface timeout as failure; output explains
             elif exit_code == 0:
                 status = "completed"
-            elif killed_by_signal:
+            elif rt.force_stopped or killed_by_signal:
                 # Process died from a SIGTERM/SIGKILL we did not
                 # initiate (none of our paths reach here without
                 # setting cancel_requested or timed_out first).
@@ -571,38 +679,29 @@ class BgTaskManager:
                     logger.exception("bg delivery callback failed for %s", rt.record.id)
 
     async def _terminate_proc(self, rt: _RunningTask) -> None:
-        """SIGTERM the whole process group; 5s grace; SIGKILL if needed.
+        """Ask the whole process group to stop; 5s grace; force it if needed.
 
-        We spawned with start_new_session=True, so killing the group
+        The task was spawned as a group leader (`spawn_kwargs()`), so this
         sweeps up any children the model's shell command forked off
         (e.g. `bash -c "long_running &"`).
         """
         proc = rt.proc
         if proc.returncode is not None:
             return
-        try:
-            import os
-            pgid = os.getpgid(proc.pid)
-            # Audit trail: which path called the SIGTERM, and on what
-            # task. Pairs with the terminal-state log line so the
-            # forensics for an "exit -15" task are local to this file.
-            logger.info(
-                "bg task %s: SIGTERM pgid=%s cancel_requested=%s",
-                rt.record.id, pgid, rt.cancel_requested,
-            )
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            return
+        # Audit trail: which path asked it to stop, and on what task. Pairs with
+        # the terminal-state log line so the forensics for an "exit -15" task
+        # are local to this file.
+        logger.info(
+            "bg task %s: stopping process group pid=%s cancel_requested=%s",
+            rt.record.id, proc.pid, rt.cancel_requested,
+        )
+        terminate_group(proc)
         # Don't await here — let the wait_for in _run_task notice the exit.
-        # Schedule a SIGKILL fallback if the process resists SIGTERM.
+        # Schedule the forceful fallback if the process resists.
         async def _kill_later() -> None:
             await asyncio.sleep(5.0)
             if proc.returncode is None:
-                try:
-                    import os as _os
-                    _os.killpg(_os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                kill_group(proc)
         asyncio.create_task(_kill_later(), name=f"bg-kill-{rt.record.id}")
 
 

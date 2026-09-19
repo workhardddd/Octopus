@@ -483,11 +483,14 @@ provisioned on agent create, kept on archive, removed on hard delete.
   [`plans/session-fork.md`](plans/session-fork.md).
 - **Per-turn safety net.** Every harness turn runs with a configurable idle
   timeout (`turn_idle_timeout_seconds`, default 300 s) and an overall cap
-  (`turn_max_seconds`, default 1800 s). The child subprocess is spawned in its
-  own process group (`start_new_session=True`) so `stop()` kills the whole
-  group, not just the direct child. A timed-out turn surfaces a `turn_timeout`
+  (`turn_max_seconds`, default 1800 s). The child subprocess is spawned as its
+  own group leader through `server/proc.py` — `start_new_session` on POSIX,
+  `CREATE_NEW_PROCESS_GROUP` on Windows — so `stop()` kills the whole group, not
+  just the direct child. A timed-out turn surfaces a `turn_timeout`
   error and never enters premature-exit recovery or transient retry. Design:
-  [`plans/turn-safety.md`](plans/turn-safety.md).
+  [`plans/turn-safety.md`](plans/turn-safety.md);
+  [`plans/windows-support.md`](plans/windows-support.md) for the per-platform
+  spelling.
 - **Three-tier failed-turn disposition.** After a turn fails, the run loop
   classifies the error: (1) auth-credential rejection (401/revoked/expired) →
   flag the bound credential `needs_reconnect` and stop — re-auth won't fix

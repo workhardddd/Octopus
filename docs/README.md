@@ -54,6 +54,10 @@ design rationale. **Code comments cite these by filename + section** (e.g.
 - **[plans/native-deep-research.md](plans/native-deep-research.md)** —
   Octopus-orchestrated deep research: harness-agnostic fan-out of scoped
   web-search sub-turns with progress, cancellation, and synthesis.
+- **[plans/windows-support.md](plans/windows-support.md)** — running on Windows:
+  `server/proc.py` as the platform vocabulary for process groups (and the
+  `os.kill(pid, 0)` trap), the POSIX shell a bg command needs, and the list of
+  what stays POSIX-only (Applications' backend scripts).
 
 ## Reference notes
 

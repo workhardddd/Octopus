@@ -6,6 +6,8 @@ fake CLI, so they don't need a real claude/codex binary.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -172,6 +174,13 @@ async def test_engine_stop_kills_hung_subprocess(tmp_path):
     await asyncio.wait_for(run.stop(), timeout=6.0)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only premise: the fallback dirs emulate a systemd service "
+    "PATH (~/.local/bin, Homebrew, the POSIX nvm layout) and the probe is a "
+    "#!/bin/sh script — Windows has no service PATH to strip and cannot exec a "
+    "shebang script",
+)
 @pytest.mark.asyncio
 async def test_engine_resolves_binary_from_fallback_dir(tmp_path, monkeypatch):
     """A bare binary not on PATH but in ~/.local/bin still resolves (the
@@ -452,64 +461,67 @@ def test_is_transient_error_retries_server_side_throttle():
 # (MCP servers / subagents) are reaped as a unit, not orphaned.
 
 
-def test_prepare_spawn_sets_session_leader():
+def test_prepare_spawn_isolates_the_process_group():
+    """Which kwarg isolates a child's process group is the platform's business
+    (`server/proc.py`); that a turn is isolated at all is not (turn-safety.md
+    §2)."""
     from server.harness.run import prepare_spawn
 
-    _, kwargs = prepare_spawn(["sh", "-c", "true"], {})
-    assert kwargs.get("start_new_session") is True
+    _, kwargs = prepare_spawn([sys.executable, "-c", "true"], {})
+    if os.name == "nt":
+        flags = kwargs.get("creationflags", 0)
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs.get("start_new_session") is True
 
 
 @pytest.mark.asyncio
-async def test_terminate_process_group_reaps_children(tmp_path):
+async def test_kill_group_reaps_children():
     """Killing the group must take down a CHILD the spawned process started —
-    the orphan leak the old direct-child kill() left behind."""
-    import os
-    import signal as _signal
-    from server.harness.run import _terminate_process_group, prepare_spawn
+    the orphan leak a direct-child kill() leaves behind."""
+    import server.proc as proc_mod
+    from server.harness.run import prepare_spawn
 
-    def _alive(pid: int) -> bool:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
-
-    # Parent starts a backgrounded `sleep`, prints its pid, then waits — so the
-    # child shares the parent's new process group.
-    argv, kwargs = prepare_spawn(
-        ["sh", "-c", "sleep 30 & echo $!; wait"], {}
+    # Parent starts a grandchild, prints its pid, then waits — so the child
+    # shares the parent's new process group. Python children rather than
+    # `sh -c "sleep 30 &"`: no shell needed, so the test runs everywhere.
+    script = (
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print(p.pid, flush=True)\n"
+        "time.sleep(30)\n"
     )
+    argv, kwargs = prepare_spawn([sys.executable, "-c", script], {})
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, **kwargs
     )
     child_pid = int((await proc.stdout.readline()).strip())
-    assert _alive(child_pid)
+    assert proc_mod.pid_alive(child_pid)
 
-    sent_group = _terminate_process_group(proc, _signal.SIGKILL)
+    sent_group = proc_mod.kill_group(proc)
     await proc.wait()
-    for _ in range(50):  # let the kernel reap the child
-        if not _alive(child_pid):
+    for _ in range(100):  # let the OS finish reaping the child
+        if not proc_mod.pid_alive(child_pid):
             break
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
     assert sent_group is True
-    assert not _alive(child_pid), "child process was orphaned, not reaped"
+    assert not proc_mod.pid_alive(child_pid), "child process was orphaned, not reaped"
 
 
 @pytest.mark.asyncio
 async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     """Cancelling a run_oneshot mid-flight must reap its process group, not
     orphan the CLI (Vera review). We spy on the group-kill helper."""
-    import signal as _signal
-    import server.harness.run as run_mod
+    import server.harness.harness as harness_mod
 
-    calls: list[int] = []
-    real = run_mod._terminate_process_group
+    calls: list[str] = []
+    real = harness_mod.kill_group
 
-    def spy(proc, sig):
-        calls.append(sig)
-        return real(proc, sig)
+    def spy(proc):
+        calls.append("kill")
+        return real(proc)
 
-    monkeypatch.setattr(run_mod, "_terminate_process_group", spy)
+    monkeypatch.setattr(harness_mod, "kill_group", spy)
 
     def build_oneshot_argv(ctx):
         return ([sys.executable, "-c", "import time; time.sleep(30)"], {})
@@ -524,7 +536,7 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert _signal.SIGKILL in calls
+    assert calls == ["kill"]
 
 
 # --------------------------------------------------------------------------- #
