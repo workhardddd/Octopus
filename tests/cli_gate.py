@@ -24,6 +24,8 @@ import os
 import shutil
 import subprocess
 
+from server.proc import kill_group, spawn_kwargs
+
 
 def _resolve_cli(binary: str) -> str | None:
     """Resolve a CLI honoring the same PATH fallback the harness uses (nvm /
@@ -53,26 +55,67 @@ def _probe(argv: list[str], *, timeout: float, cwd: str | None = None) -> bool:
     A loaded machine (a parallel suite, several CLIs mid-turn) can push a
     trivial call past its limit; one retry absorbs that. Two timeouts in a row
     is not load, and is reported rather than swallowed.
+
+    Two things here exist because of a measured session, where the gates turned
+    a twenty-minute test run into a mystery:
+
+    * **It says what it is doing.** A silent probe that takes four minutes looks
+      exactly like a hung test run, which is how a person ends up re-running
+      things and waiting twice.
+    * **A timeout kills the process GROUP.** `subprocess.run(timeout=…)` kills
+      only the direct child and then keeps reading its pipes until EOF, so a CLI
+      that leaves a grandchild behind overruns the deadline (measured on this
+      repo's own box: a 20s limit returned after 25.6s). The group kill is what
+      makes the stated limit true, which is what makes "90s then 180s" a bound
+      someone can reason about.
     """
-    last: Exception | None = None
-    for attempt, limit in enumerate((timeout, timeout * 2)):
+    last: str = "no attempt was made"
+    for limit in (timeout, timeout * 2):
         try:
-            proc = subprocess.run(
-                argv, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=limit, cwd=cwd,
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                **spawn_kwargs(),
             )
-            return proc.returncode == 0
-        except subprocess.TimeoutExpired as exc:
-            last = exc
-            continue
-        except OSError:
+        except OSError as exc:
             return False
+        try:
+            proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            _kill_probe(proc)
+            last = f"{' '.join(argv)} timed out after {limit:.0f}s"
+            print(f"[cli-gate] {last}; retrying once", flush=True)
+            continue
+        return proc.returncode == 0
     raise CliProbeTimeout(
         f"{argv[0]} did not answer a trivial probe within "
         f"{timeout:.0f}s or {timeout * 2:.0f}s. This is NOT a lapsed login — "
         f"tests must not be skipped on it. Re-run on a less loaded machine, "
         f"or fix the CLI. (last: {last})"
     )
+
+
+def _kill_probe(proc: subprocess.Popen) -> None:
+    """Stop a probe that overran, group first, then make sure it is reaped.
+
+    Every step is best-effort: a probe is advisory until it answers, and a
+    failure to clean up must not replace the gate's own diagnosis with an
+    unrelated OSError.
+    """
+    try:
+        kill_group(proc)
+    except Exception:
+        pass
+    try:
+        proc.communicate(timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 @functools.lru_cache(maxsize=1)
