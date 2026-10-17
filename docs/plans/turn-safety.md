@@ -1,5 +1,14 @@
 # Turn safety (Layer 1): timeout + process-group reaping
 
+Updated 2026-09-19: the group mechanics described below now live in
+`server/proc.py` (POSIX `start_new_session` + `killpg`; Windows
+`CREATE_NEW_PROCESS_GROUP` + `CTRL_BREAK_EVENT`, then `taskkill /F /T`), because
+`signal.SIGKILL` evaluated as an import-time default kept the whole server from
+importing on Windows. The design's shape — spawn as a group leader, kill the
+group — is unchanged, and `bg_tasks` / `app_backends` / `codex_login` now share
+the same helper instead of each doing it themselves. See
+[`windows-support.md`](windows-support.md).
+
 ## 1. Why
 
 A session ("stock") ran a long, tool-heavy operation (the `/deep-research`

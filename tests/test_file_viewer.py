@@ -27,6 +27,7 @@ from server.file_viewer import (
 )
 from server.main import app
 from server.session_manager import session_manager
+from tests.capabilities import can_symlink
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -87,6 +88,11 @@ def test_rejects_absolute_path_outside_root(tmp_path):
         resolve_safe_path(tmp_path, str(tmp_path.parent / "elsewhere.txt"))
 
 
+@pytest.mark.skipif(
+    not can_symlink(),
+    reason="this host cannot create symlinks (Windows needs Developer Mode or "
+    "elevation) — windows-support.md §7",
+)
 def test_rejects_symlink_escaping_root(tmp_path):
     outside_root = tmp_path / "outside"
     outside_root.mkdir()
@@ -187,8 +193,11 @@ async def session_with_files(client, tmp_path):
     populate it with files of various kinds. Returns (session_id, root)."""
     root = tmp_path / "wd"
     root.mkdir()
-    (root / "plan.md").write_text("# plan\nstep one")
-    (root / "main.py").write_text("def main():\n    pass\n")
+    # Written with an explicit newline so the byte count the route reports is
+    # the same on every platform — text mode would turn `\n` into `\r\n` on
+    # Windows and the size assertions would be off by one per line.
+    (root / "plan.md").write_text("# plan\nstep one", newline="\n")
+    (root / "main.py").write_text("def main():\n    pass\n", newline="\n")
     (root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
     (root / "doc.pdf").write_bytes(b"%PDF-1.4\nfake")
     (root / "blob.bin").write_bytes(b"\x00\x01")
@@ -200,7 +209,11 @@ async def session_with_files(client, tmp_path):
 
     agent = await session_manager.db.get_system_agent()
     sess = await session_manager.create_session(
-        agent["id"], name="viewer-test", working_dir=str(root)
+        agent["id"], name="viewer-test", working_dir=str(root),
+        # Pinned: the credential assertions below are claude-shaped (an
+        # `env_secret` sk-ant key), and a session that inherited whatever the
+        # registry default is would be testing a different harness.
+        backend="claude-code",
     )
     return sess.id, root
 
@@ -350,10 +363,14 @@ async def _patch_showme(monkeypatch):
     """Capture the credential argument the resolver was called with."""
     captured: dict = {}
 
-    async def _fake_resolve(text, *, harness, model, credential, working_dir, messages, session_name=None):
+    async def _fake_resolve(
+        text, *, harness, model, credential, working_dir, messages,
+        session_name=None, agent_id=None,
+    ):
         captured["credential"] = credential
         captured["model"] = model
         captured["working_dir"] = working_dir
+        captured["agent_id"] = agent_id
         from server.showme_ai import ShowMeResolution
 
         return ShowMeResolution(path="answer.md")

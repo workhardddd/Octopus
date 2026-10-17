@@ -55,7 +55,11 @@ async def test_an_app_asks_a_real_agent_about_its_context(tmp_path, monkeypatch)
         agent_api = AppAgentManager()
         agent_api.bind(session_mgr=sessions, db=db, app_mgr=apps)
 
-        agent = await AgentManager(db).create_agent(name=f"Reader {uuid.uuid4().hex[:6]}")
+        # Pinned: this test drives a real turn and gates on `claude`, so it must
+        # not inherit whatever the registry's default kind happens to be.
+        agent = await AgentManager(db).create_agent(
+            name=f"Reader {uuid.uuid4().hex[:6]}", backend="claude-code"
+        )
         # The row directly, not create_application: a build turn would cost a
         # second real call and has nothing to do with what's under test.
         app_id = uuid.uuid4().hex[:12]

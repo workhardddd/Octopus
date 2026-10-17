@@ -25,6 +25,7 @@ from server.harness.run import _which_with_fallback
 from server.harness import claude_code as cc
 from server.harness import codex as cx
 from server.harness.events import HarnessCredential
+from tests.cli_gate import CLI_OUTPUT
 
 # Substrings that mark an ENVIRONMENTAL CLI failure (auth/quota/provider), not a
 # fork-logic bug — when a non-zero call shows one, we skip instead of fail.
@@ -56,7 +57,7 @@ async def test_claude_native_copy_resume_recalls_context(tmp_path):
     r = subprocess.run(
         [exe, "--print", "--output-format=json", "--dangerously-skip-permissions",
          "Remember this exactly: the codeword is ZEBRA77. Acknowledge in 3 words."],
-        cwd=str(src), capture_output=True, text=True, timeout=120,
+        cwd=str(src), timeout=120, **CLI_OUTPUT,
     )
     _skip_if_env_failure(r, "claude create")
     assert r.returncode == 0, r.stderr
@@ -74,7 +75,7 @@ async def test_claude_native_copy_resume_recalls_context(tmp_path):
             [exe, "--print", "--output-format=json", "--dangerously-skip-permissions",
              "--resume", nid,
              "What is the codeword I told you earlier? Reply with ONLY the word."],
-            cwd=str(dst), capture_output=True, text=True, timeout=120,
+            cwd=str(dst), timeout=120, **CLI_OUTPUT,
         )
         _skip_if_env_failure(r2, "claude resume")
         assert r2.returncode == 0, r2.stderr
@@ -115,7 +116,7 @@ async def test_codex_native_copy_resume_recalls_context(tmp_path):
         return subprocess.run(
             [exe, "exec", "--json", "--skip-git-repo-check", "-C", str(wd),
              "--dangerously-bypass-approvals-and-sandbox", *extra],
-            capture_output=True, text=True, timeout=180, env=env,
+            timeout=180, env=env, **CLI_OUTPUT,
         )
 
     r = _run(src, ["--", "Remember this exactly: the codeword is ZEBRA77. Acknowledge in 3 words."])

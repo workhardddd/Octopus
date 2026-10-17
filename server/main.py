@@ -130,11 +130,21 @@ async def lifespan(app: FastAPI):
             print("=" * 60 + "\n")
             logger.info("Cloudflare Tunnel active: %s", url)
 
+    # DSH materializes a plugin workspace inside `$DSH_HOME/profiles` on first
+    # boot: slow, and it needs the network. Pre-warm the shared one here so the
+    # first turn never pays for it — and so a cold initialization can never look
+    # like a hung turn to the per-turn watchdog (dsh-harness.md §3.5).
+    from .harness import available_backends as _available_backends
+
+    if "dsh" in _available_backends():
+        from . import dsh_home
+
+        dsh_home.ensure_shared_profiles()
+
     # Idle-process reaper (inline-steering.md §7): a session keeps its CLI
     # process after a turn so the next one skips the ~1.5s spawn, and this
     # drops the ones that stop earning their ~255MB.
     session_manager.start_reaper()
-
     yield
 
     await session_manager.stop_reaper()
@@ -212,16 +222,18 @@ app.include_router(ws.router)
 
 @app.get("/api/backends")
 async def list_backends(_: str = Depends(verify_token)):
-    """Which AI backends are usable on this host (codex-backend.md §6.1).
-    A harness kind appears only when its CLI resolves on PATH. `claude-code`
-    is always listed (the default) even if not yet installed, matching the
-    historical contract."""
-    from .harness import available_backends
+    """Which AI backends are usable on this host (codex-backend.md §6.1), with
+    the default kind FIRST.
 
-    available = available_backends()
-    if "claude-code" not in available:
-        available = ["claude-code", *available]
-    return {"available": available}
+    A kind appears only when its CLI resolves on PATH — except the default kind,
+    which is always listed even before it is installed (the historical
+    contract, and what lets a fresh install pick an engine). Order matters:
+    clients read the first entry as the default, so the default is also what a
+    picker pre-selects."""
+    from .harness import DEFAULT_BACKEND, available_backends
+
+    available = [b for b in available_backends() if b != DEFAULT_BACKEND]
+    return {"available": [DEFAULT_BACKEND, *available]}
 
 
 @app.get("/health")

@@ -51,13 +51,17 @@ that turn.
 | `applications/` | agent-built web apps, plain static files | **yes** — nothing else has a copy (§5) |
 | `attachments/` | files you uploaded, one subdir per session | yes, if you want old messages' files to resolve |
 | `codex/` | per-credential `CODEX_HOME` (Codex auth + state) | yes, or re-run the Codex device login after |
+| `dsh/` | per-agent `DSH_HOME` (DSH's own sessions, settings, and the generated per-spawn patch) | no — Octopus's own transcript is authoritative; a restored home only means agents resume cold |
 | `large-prompts/` | spill files for prompts too big for argv | no — transient |
 | `research/` | deep-research artefacts | only if you want old reports |
 | `fork/` | full working-directory copies made by `/fork` | usually **no** — see §5 |
 
 **Credentials, outside both**: `~/.claude/.credentials.json` (Claude login),
 `~/.codex/auth.json` (host-level Codex login), and the `.env` holding
-`OCTOPUS_AUTH_TOKEN` and any tunnel config.
+`OCTOPUS_AUTH_TOKEN` and any tunnel config. DSH credentials do **not** live
+outside: an agent's DeepSeek key is stored encrypted in the database (and
+injected into the agent's DSH process), so backing up `octopus.db` carries it,
+and the host's own `~/.dsh/` is never used by an Octopus agent.
 
 ## 2. The minimum backup set
 

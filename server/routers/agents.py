@@ -133,6 +133,7 @@ async def create_agent_session(
 ):
     """Preferred path to start a session — the agent comes from the URL, so
     the body's `agent_id` (if any) is ignored."""
+    from ..harness import DEFAULT_BACKEND
     from .sessions import _check_credential_backend, _to_session_info
 
     # Inherit the agent's default backend when the request doesn't pin one.
@@ -140,7 +141,7 @@ async def create_agent_session(
     backend = (
         req.backend.value
         if req.backend is not None
-        else (agent.get("backend") if agent else None) or "claude-code"
+        else (agent.get("backend") if agent else None) or DEFAULT_BACKEND
     )
     await _check_credential_backend(req.credential_id, backend)
     try:
@@ -204,7 +205,7 @@ async def create_agent_schedule_from_text(
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     from .schedules import create_schedule_for_agent, to_schedule_info
-    from ..harness import get_harness
+    from ..harness import DEFAULT_BACKEND, get_harness
     from ..schedule_ai import ScheduleParseError, parse_schedule_text
 
     # The AI parse runs on the agent's own harness (claude-code or codex —
@@ -224,6 +225,7 @@ async def create_agent_schedule_from_text(
             now_iso=req.now,
             model=agent.get("model") or None,
             credential=credential,
+            agent_id=agent_id,
         )
     except ScheduleParseError as e:
         raise HTTPException(422, str(e))

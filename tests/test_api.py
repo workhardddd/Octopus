@@ -1,5 +1,7 @@
 """End-to-end tests for REST API using FastAPI TestClient."""
 
+import os
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -65,7 +67,7 @@ async def test_create_session(client):
     assert resp.status_code == 201
     data = resp.json()
     assert data["name"] == "Test Session"
-    assert data["working_dir"] == "/tmp"
+    assert data["working_dir"] == os.path.abspath("/tmp")
     assert data["status"] == "idle"
     assert "id" in data
 
@@ -138,7 +140,7 @@ async def test_archive_session(client):
     new_id = body["id"]
     assert new_id != old_id
     assert body["name"] == "Archive Me"
-    assert body["working_dir"] == "/tmp/archived"
+    assert body["working_dir"] == os.path.abspath("/tmp/archived")
 
     # Old session is hidden from the list; new one appears.
     list_resp = await client.get("/api/sessions", headers=HEADERS)
@@ -180,12 +182,17 @@ async def test_archive_session_not_found(client):
 
 
 @pytest.mark.asyncio
-async def test_create_session_defaults_backend_to_claude_code(client):
+async def test_create_session_inherits_its_agents_engine(client):
+    """A session created without an explicit engine takes its agent's — and a
+    fresh install seeds the system agent on the *default* kind, not on whatever
+    the SQL column default happens to be."""
+    from server.harness import DEFAULT_BACKEND
+
     resp = await client.post(
         "/api/sessions", headers=HEADERS, json={"name": "Default Backend"}
     )
     assert resp.status_code == 201
-    assert resp.json()["backend"] == "claude-code"
+    assert resp.json()["backend"] == DEFAULT_BACKEND
 
 
 @pytest.mark.asyncio
@@ -223,10 +230,17 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
 
 
 @pytest.mark.asyncio
-async def test_list_backends_includes_claude_code(client):
+async def test_list_backends_puts_the_default_kind_first(client):
+    """The default kind is listed even on a host where its CLI is absent (so a
+    fresh install can still pick an engine), and it comes FIRST: clients read
+    the first entry as the default, which is what their pickers pre-select."""
+    from server.harness import DEFAULT_BACKEND
+
     resp = await client.get("/api/backends", headers=HEADERS)
     assert resp.status_code == 200
-    assert "claude-code" in resp.json()["available"]
+    available = resp.json()["available"]
+    assert available[0] == DEFAULT_BACKEND
+    assert len(available) == len(set(available)), "no duplicates"
 
 
 @pytest.mark.asyncio
@@ -241,11 +255,20 @@ async def test_session_info_reports_the_steering_capability(client):
     assert _can_steer("claude-code") is True
     # Codex's prompt lives in argv; it keeps queue-until-idle.
     assert _can_steer("codex") is False
+    # DSH reuses its process between turns but has no mid-turn input channel —
+    # ACP takes one prompt at a time — so it queues too. The same declared
+    # degradation as codex, arrived at for a different reason
+    # (dsh-harness.md §10.2).
+    assert _can_steer("dsh") is False
     # An unknown backend must not claim a capability it can't honour.
     assert _can_steer("nonsense-backend") is False
 
+    # Steered through the session's own engine: pinned rather than inherited,
+    # because this asserts the capability plumbing, not what the default is.
     res = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Steerable"}
+        "/api/sessions",
+        headers=HEADERS,
+        json={"name": "Steerable", "backend": "claude-code"},
     )
     assert res.status_code == 201
     assert res.json()["can_steer"] is True
@@ -255,6 +278,12 @@ async def test_session_info_reports_the_steering_capability(client):
     )
     assert cx.status_code == 201
     assert cx.json()["can_steer"] is False
+
+    dsh = await client.post(
+        "/api/sessions", headers=HEADERS, json={"name": "Dsh", "backend": "dsh"}
+    )
+    assert dsh.status_code == 201
+    assert dsh.json()["can_steer"] is False
 
 
 @pytest.mark.asyncio

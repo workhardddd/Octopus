@@ -28,6 +28,7 @@ from .events import (
     HarnessOneshotError,
     SubagentUpdate,
 )
+from .fork import CLI_FILE
 from .harness import Harness
 from .login import LoginMethod
 from .profile import (
@@ -167,11 +168,25 @@ delegations from this session."""
 def _apply_env_credential(env: dict[str, str], credential: HarnessCredential | None) -> None:
     """Materialize an env_secret credential. api_key → ANTHROPIC_API_KEY
     (a long-lived sk-ant- key); oauth → CLAUDE_CODE_OAUTH_TOKEN (a refreshed
-    Pro/Max access token). Both override any on-disk `claude login`."""
+    Pro/Max access token). Both override any on-disk `claude login`.
+
+    A credential that carries a `base_url` is a relay/self-hosted endpoint,
+    and it owns the *whole* connection, not just the key: the endpoint goes
+    out as ANTHROPIC_BASE_URL and the secret as ANTHROPIC_AUTH_TOKEN — the
+    `Authorization: Bearer` header a relay expects, versus the `x-api-key`
+    header ANTHROPIC_API_KEY produces — and every auth var inherited from
+    the server's own environment is scrubbed, so a relay credential can
+    never reach for the host's key or the host's endpoint. Without a
+    base_url the inherited environment is left exactly as it was."""
     if credential is None:
         return
+    if credential.base_url:
+        env["ANTHROPIC_BASE_URL"] = credential.base_url
+        for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            env.pop(var, None)
     if credential.auth_type == "api_key":
-        env["ANTHROPIC_API_KEY"] = credential.secret
+        key_var = "ANTHROPIC_AUTH_TOKEN" if credential.base_url else "ANTHROPIC_API_KEY"
+        env[key_var] = credential.secret
     elif credential.auth_type == "oauth":
         env["CLAUDE_CODE_OAUTH_TOKEN"] = credential.secret
 
@@ -660,7 +675,7 @@ async def _fork_copy(
     # leave a half-written transcript that later looks resumable (Vera review).
     tmp = dest.with_suffix(".jsonl.tmp")
     try:
-        with src.open() as fin, tmp.open("w") as fout:
+        with src.open(**CLI_FILE) as fin, tmp.open("w", **CLI_FILE) as fout:
             for line in fin:
                 line = line.strip()
                 if not line:

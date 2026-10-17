@@ -23,6 +23,16 @@ from dataclasses import dataclass
 NATIVE_TRANSCRIPT = "native_transcript"
 HISTORY_REPLAY = "history_replay"
 
+#: `open()` keywords for a file a CLI wrote — a transcript, a rollout.
+#:
+#: Python's text-mode default is the *locale*, so on a Chinese Windows (GBK) a
+#: transcript containing one character outside that code page made `/fork` die
+#: with `UnicodeDecodeError` while working everywhere else. Every CLI writes
+#: UTF-8. `surrogateescape` is what makes the round trip byte-faithful: a fork
+#: copy rewrites one field per line and must preserve everything else it does
+#: not understand, rather than failing on it or replacing it.
+CLI_FILE: dict[str, str] = {"encoding": "utf-8", "errors": "surrogateescape"}
+
 
 @dataclass
 class ForkArtifact:

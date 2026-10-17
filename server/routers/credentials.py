@@ -62,6 +62,24 @@ def _require_db():
     return _db
 
 
+# Backends whose harness actually renders a credential's `base_url` into the
+# subprocess env. Codex's endpoint lives in its CODEX_HOME config.toml provider
+# table — nothing an env var can override — so a base_url there would be
+# stored-but-silently-ignored, which is worse than refusing it.
+_BASE_URL_BACKENDS = frozenset({"claude-code", "dsh"})
+
+
+def _check_base_url(backend: str, base_url: str | None) -> None:
+    if base_url and backend not in _BASE_URL_BACKENDS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"backend {backend!r} cannot use a custom base URL; "
+                f"supported: {', '.join(sorted(_BASE_URL_BACKENDS))}"
+            ),
+        )
+
+
 def _row_to_info(row: dict) -> CredentialInfo:
     return CredentialInfo(
         id=row["id"],
@@ -73,6 +91,7 @@ def _row_to_info(row: dict) -> CredentialInfo:
         token_expires_at=row.get("token_expires_at"),
         needs_reconnect=bool(row.get("needs_reconnect", False)),
         last_refresh_error_code=row.get("last_refresh_error_code"),
+        base_url=row.get("base_url"),
     )
 
 
@@ -87,6 +106,7 @@ async def create_credential(
     req: CreateCredentialRequest, _: str = Depends(verify_token)
 ):
     db = _require_db()
+    _check_base_url(req.backend.value, req.base_url)
     cid = uuid.uuid4().hex[:12]
     created_at = datetime.now(timezone.utc).isoformat()
     secret_encrypted = encrypt(req.secret, settings.auth_token)
@@ -97,6 +117,7 @@ async def create_credential(
         auth_type=req.auth_type.value,
         secret_encrypted=secret_encrypted,
         created_at=created_at,
+        base_url=req.base_url or None,
     )
     return CredentialInfo(
         id=cid,
@@ -104,6 +125,7 @@ async def create_credential(
         label=req.label,
         auth_type=req.auth_type,
         created_at=created_at,
+        base_url=req.base_url or None,
     )
 
 
@@ -121,6 +143,11 @@ async def update_credential(
     update_kwargs: dict = {}
     if req.label is not None:
         update_kwargs["label"] = req.label
+    if req.base_url is not None:
+        # "" clears the endpoint; a URL swaps it. Either way the next turn
+        # must respawn (the spawn signature covers the whole credential).
+        _check_base_url(existing["backend"], req.base_url)
+        update_kwargs["base_url"] = req.base_url or None
     if req.secret is not None:
         update_kwargs["secret_encrypted"] = encrypt(req.secret, settings.auth_token)
         # A fresh secret recovers a credential the CLI had rejected — clear
@@ -153,10 +180,13 @@ async def delete_credential(credential_id: str, _: str = Depends(verify_token)):
     if not deleted:
         raise HTTPException(status_code=404, detail="credential not found")
     # Revoke any on-disk login state for this credential's harness (Codex
-    # rmtree's its CODEX_HOME; Claude has nothing on disk). The harness owns
-    # the cleanup — no backend-kind branching here.
+    # rmtree's its CODEX_HOME; Claude has nothing on disk, and DSH takes a
+    # pasted key with no login state at all). The harness owns the cleanup —
+    # no backend-kind branching here.
     if row is not None and has_backend(row.get("backend")):
-        get_harness(row["backend"]).login.cleanup_credential(credential_id)
+        login = get_harness(row["backend"]).login
+        if login is not None:
+            login.cleanup_credential(credential_id)
 
 
 # ---------------------------------------------------------------------------

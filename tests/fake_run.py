@@ -16,7 +16,13 @@ from __future__ import annotations
 class FakeRunBase:
     """The parts of `HarnessRun` every stand-in must answer."""
 
+    #: Whether the stand-in's process serves more than one turn.
     reusable = False
+
+    #: Whether a message can be injected into the turn already running. Kept
+    #: separate from `reusable` on purpose: a protocol-backed run reuses its
+    #: process but queues mid-turn messages (inline-steering.md §8).
+    can_steer = False
 
     def is_alive(self) -> bool:
         return True

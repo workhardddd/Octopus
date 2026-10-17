@@ -1138,6 +1138,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate Token
+         * @description Change the access token everywhere it lives.
+         *
+         *     Authenticated with the **old** token — which is exactly who is allowed to
+         *     do this — and, unless `revoke_other_clients` is set, the new token is
+         *     broadcast to clients already holding the old one so open tabs carry on
+         *     without a re-login (§3).
+         */
+        post: operations["rotate_token_api_auth_rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/connectors/catalog": {
         parameters: {
             query?: never;
@@ -1429,10 +1454,14 @@ export interface paths {
         };
         /**
          * List Backends
-         * @description Which AI backends are usable on this host (codex-backend.md §6.1).
-         *     A harness kind appears only when its CLI resolves on PATH. `claude-code`
-         *     is always listed (the default) even if not yet installed, matching the
-         *     historical contract.
+         * @description Which AI backends are usable on this host (codex-backend.md §6.1), with
+         *     the default kind FIRST.
+         *
+         *     A kind appears only when its CLI resolves on PATH — except the default kind,
+         *     which is always listed even before it is installed (the historical
+         *     contract, and what lets a fresh install pick an engine). Order matters:
+         *     clients read the first entry as the default, so the default is also what a
+         *     picker pre-selects.
          */
         get: operations["list_backends_api_backends_get"];
         put?: never;
@@ -1489,7 +1518,7 @@ export interface components {
             model?: string | null;
             /** Credential Id */
             credential_id?: string | null;
-            /** @default claude-code */
+            /** @default dsh */
             backend: components["schemas"]["BackendKind"];
             /**
              * Mcp Servers
@@ -1872,7 +1901,7 @@ export interface components {
          * BackendKind
          * @enum {string}
          */
-        BackendKind: "claude-code" | "codex";
+        BackendKind: "claude-code" | "codex" | "dsh";
         /** Body_upload_attachment_api_sessions__session_id__attachments_post */
         Body_upload_attachment_api_sessions__session_id__attachments_post: {
             /** File */
@@ -2039,6 +2068,8 @@ export interface components {
             auth_type: components["schemas"]["AuthType"];
             /** Secret */
             secret: string;
+            /** Base Url */
+            base_url?: string | null;
         };
         /** CreateNotifierRequest */
         CreateNotifierRequest: {
@@ -2119,6 +2150,8 @@ export interface components {
             needs_reconnect: boolean;
             /** Last Refresh Error Code */
             last_refresh_error_code?: string | null;
+            /** Base Url */
+            base_url?: string | null;
         };
         /**
          * CredentialStatus
@@ -2710,6 +2743,34 @@ export interface components {
             /** Enabled */
             enabled: boolean;
         };
+        /**
+         * TokenRotateRequest
+         * @description Change the access token (token-rotation.md).
+         */
+        TokenRotateRequest: {
+            /** New Token */
+            new_token: string;
+            /**
+             * Revoke Other Clients
+             * @default false
+             */
+            revoke_other_clients: boolean;
+        };
+        /** TokenRotateResponse */
+        TokenRotateResponse: {
+            /**
+             * Env Files
+             * @default []
+             */
+            env_files: string[];
+            /**
+             * Reencrypted
+             * @default {}
+             */
+            reencrypted: {
+                [key: string]: number;
+            };
+        };
         /** UpdateConnectorRequest */
         UpdateConnectorRequest: {
             /** Label */
@@ -2723,6 +2784,8 @@ export interface components {
             label?: string | null;
             /** Secret */
             secret?: string | null;
+            /** Base Url */
+            base_url?: string | null;
         };
         /** UpdateNotifierRequest */
         UpdateNotifierRequest: {
@@ -5183,6 +5246,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotate_token_api_auth_rotate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenRotateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenRotateResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

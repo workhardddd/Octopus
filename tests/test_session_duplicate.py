@@ -16,6 +16,7 @@ from server.main import app
 from server import session_manager as sm
 from server.session_manager import ForkError, QueuedPrompt, SessionManager
 from server.session_manager import session_manager as global_sm
+from tests.capabilities import isolate_home
 
 
 @pytest.fixture
@@ -66,7 +67,7 @@ def _repo(tmp_path):
 
 @pytest.mark.asyncio
 async def test_duplicate_copies_dir_and_history(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -105,7 +106,7 @@ async def test_duplicate_native_copy_when_parent_has_transcript(manager, tmp_pat
     # When the parent has a real Claude transcript, the fork copies it and
     # resumes natively (no history replay): fork_needs_replay is False and the
     # fork gets a fresh resume id pointing at the copied transcript.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     from server.harness import claude_code as cc
 
@@ -138,7 +139,7 @@ async def test_duplicate_pins_cleanup_credential_for_codex(manager, tmp_path, mo
     # A Codex fork pins the fork-time effective credential id in fork_metadata so
     # the startup sweep can find the right CODEX_HOME even if the agent's
     # credential later changes. Claude (no per-credential store) does NOT pin.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     cx_parent = await _seed_parent(manager, repo, backend="codex")
     cx_parent.credential_id = "cred-1"
@@ -156,7 +157,7 @@ async def test_duplicate_pins_cleanup_credential_for_codex(manager, tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_duplicate_leaves_parent_untouched(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -174,7 +175,7 @@ async def test_duplicate_leaves_parent_untouched(manager, tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_duplicate_broadcasts_session_forked(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -205,7 +206,7 @@ async def test_duplicate_unknown_parent(manager):
 
 @pytest.mark.asyncio
 async def test_duplicate_refused_active_task(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -225,7 +226,7 @@ async def test_duplicate_refused_active_task(manager, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_refused_queued_message(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
     parent._pending_queue.append(QueuedPrompt(prompt="later", attachment_ids=[]))
@@ -236,7 +237,7 @@ async def test_duplicate_refused_queued_message(manager, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_backend_not_supported(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -253,7 +254,7 @@ async def test_duplicate_backend_not_supported(manager, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_prepare_fork_failure_compensates(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -297,7 +298,7 @@ async def client():
 
 @pytest.mark.asyncio
 async def test_duplicate_route(client, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(global_sm, repo)
 
@@ -330,7 +331,7 @@ async def test_duplicate_route_unknown_parent(client):
 
 @pytest.mark.asyncio
 async def test_duplicate_route_exposes_full_copy_flag(client, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(global_sm, repo)
     H = {"Authorization": "Bearer changeme"}
@@ -352,7 +353,7 @@ async def test_duplicate_replay_cutoff_covers_full_history(manager, tmp_path, mo
     # The HISTORY_REPLAY first turn injects parent messages with
     # seq <= fork_after_seq. For a duplicate that cutoff MUST cover the whole
     # carried-over conversation — otherwise the fork continues with no context.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo, n_user=3)  # 6 messages, seq 0..5
 
@@ -371,7 +372,7 @@ async def test_duplicate_replay_cutoff_covers_full_history(manager, tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_duplicate_copy_failure_removes_partial_dir(manager, tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -401,7 +402,7 @@ async def test_duplicate_cleanup_failure_leaves_row_and_dir(manager, tmp_path, m
     # If artifact cleanup ALSO fails after prepare_fork blew up, leave both the
     # 'initializing' row AND the copied dir for the startup sweep to retry — do
     # NOT strand the row pointing at a deleted working_dir.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
@@ -433,7 +434,7 @@ async def test_duplicate_cleanup_failure_leaves_row_and_dir(manager, tmp_path, m
 async def test_recover_removes_abandoned_fork_copy_dir(manager, tmp_path, monkeypatch):
     # The startup sweep purges an 'initializing' duplicate AND removes its
     # private copied dir (a /rewind fork's shared parent dir is left alone).
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     copied = Path(manager._fork_copy_dest(str(tmp_path / "proj"), "deadbeef0001"))
     copied.mkdir(parents=True)
     (copied / "f.txt").write_text("x")
@@ -481,7 +482,7 @@ async def test_resolve_credential_require_auth_false(manager, tmp_path, monkeypa
 
 
 def test_is_fork_copy_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     base = SessionManager._fork_copy_base()
     assert SessionManager._is_fork_copy_dir(f"{base}/proj-abc") is True
     assert SessionManager._is_fork_copy_dir(base) is False  # the base itself
@@ -498,7 +499,7 @@ async def test_full_copy_marker_survives_first_turn_cleanup(manager, tmp_path, m
     # `fork_metadata` is cleared once the fork's first turn produces a result,
     # but the durable `full_copy` identity MUST persist so the UI keeps treating
     # it as a copy-dir fork rather than a rewind (Vera review).
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
     fork = await manager.duplicate_session(parent.id)
@@ -531,7 +532,7 @@ async def test_full_copy_marker_survives_first_turn_cleanup(manager, tmp_path, m
 async def test_rewind_metadata_fully_cleared_on_first_turn(manager, tmp_path, monkeypatch):
     # A /rewind fork has no durable keys → its fork_metadata clears to None
     # (so the composer doesn't re-prefill the rewound message).
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    isolate_home(monkeypatch, tmp_path / "home")
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo, n_user=3)
     fork = await manager.fork_session(parent.id, 2)  # rewind to seq 2

@@ -155,6 +155,7 @@ class ResearchManager:
                         credential=credential,
                         model=model,
                         working_dir=scratch,
+                        agent_id=session.agent_id,
                         limits=ResearchLimits(),
                         on_progress=on_progress,
                     ),

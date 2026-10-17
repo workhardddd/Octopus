@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -28,7 +29,10 @@ from server.bg_tasks import (
     BgTaskError,
     BgTaskManager,
     BgTaskRecord,
+    PosixShell,
+    bg_shell_env,
     bg_task_manager,
+    find_posix_shell,
     render_delivery_prompt,
 )
 from server.database import Database
@@ -37,6 +41,47 @@ from server.session_manager import session_manager
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+
+
+# ---------------------------------------------------------------------------
+# The shell a bg command runs under
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the POSIX branch is unconditional; Windows resolution is covered below",
+)
+def test_find_posix_shell_is_bin_sh_on_posix():
+    shell = find_posix_shell()
+    assert shell is not None
+    assert shell.path == "/bin/sh"
+    assert shell.extra_path_dirs == ()
+
+
+def test_a_shell_we_hand_to_the_spawner_is_a_real_file():
+    """Windows resolution is a search (Git for Windows), and a miss must be a
+    None — the task is then refused with an explanation rather than spawned
+    against a path that does not exist."""
+    shell = find_posix_shell()
+    if shell is None:
+        pytest.skip("no POSIX shell on this host")
+    assert os.path.isfile(shell.path)
+    for directory in shell.extra_path_dirs:
+        assert os.path.isdir(directory)
+
+
+def test_bg_shell_env_prepends_the_shells_own_bin_dirs(monkeypatch):
+    """Git for Windows keeps `sh` and its coreutils off the machine PATH, so
+    the command would exit 127 unless the shell's own dirs go first."""
+    monkeypatch.setenv("PATH", "/elsewhere")
+    env = bg_shell_env(PosixShell("/git/bin/sh.exe", ("/git/bin", "/git/usr/bin")))
+    assert env["PATH"].split(os.pathsep) == ["/git/bin", "/git/usr/bin", "/elsewhere"]
+
+
+def test_bg_shell_env_leaves_path_alone_without_extra_dirs(monkeypatch):
+    monkeypatch.setenv("PATH", "/elsewhere")
+    assert bg_shell_env(PosixShell("/bin/sh"))["PATH"] == "/elsewhere"
 
 
 # ---------------------------------------------------------------------------
@@ -151,11 +196,13 @@ async def test_idle_watchdog_terminates_proc_that_goes_silent(
 
     await _make_session_row(db, "s1", str(tmp_path))
     # Print one line, then sleep — simulates the atexit-hang shape
-    # (visible work done, process won't return).
-    cmd = (
-        f"{sys.executable} -c "
-        "\"import sys, time; print('hello', flush=True); time.sleep(30)\""
-    )
+    # (visible work done, process won't return). `sys.executable` is a
+    # backslash path on Windows and a backslash is an escape character to `sh`,
+    # so quote it and flip the separators: the same command then runs under
+    # /bin/sh and under Git's sh.
+    py = sys.executable.replace("\\", "/")
+    code = "import sys, time; print('hello', flush=True); time.sleep(30)"
+    cmd = f'"{py}" -c "{code}"'
     start = asyncio.get_running_loop().time()
     rec = await manager.start_task(
         session_id="s1",
@@ -172,7 +219,10 @@ async def test_idle_watchdog_terminates_proc_that_goes_silent(
         f"idle watchdog should label this 'interrupted', got {delivered.status!r} "
         f"(exit_code={delivered.exit_code})"
     )
-    assert delivered.exit_code is not None and delivered.exit_code < 0
+    # POSIX reports a signal death as a negative code; Windows has no such
+    # convention (a console break exits 0xC000013A) — what matters is that the
+    # task did not report success.
+    assert delivered.exit_code not in (None, 0)
     # Should kill well before the 30s sleep completes.
     assert elapsed < 10.0, f"watchdog took too long: {elapsed:.1f}s"
     # The output we printed before going silent must be preserved.
@@ -211,6 +261,12 @@ async def test_idle_watchdog_does_not_fire_on_quiet_short_command(
     assert delivered.exit_code == 0
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX-only scenario: it signals the group from outside with "
+    "os.killpg, and asserts the negative exit code a signal produces — "
+    "Windows has neither, so there is nothing here to exercise",
+)
 async def test_external_sigterm_yields_interrupted_status(manager, db, tmp_path):
     """Externally SIGTERMing the bg process group (i.e. not via
     cancel_task / shutdown / timeout — simulating uvicorn --reload,

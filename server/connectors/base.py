@@ -113,9 +113,16 @@ class ConnectorBase(abc.ABC):
         _SESSION_ID / PYTHONPATH); we add OCTOPUS_INSTALLATION_ID so the server
         knows which installation's token to fetch.
         """
+        # Local import: `server.harness` pulls the backend registry at load,
+        # which in turn reaches the connectors.
+        from ..harness.assembly import mcp_module_argv
+
         return {
             "command": sys.executable,
-            "args": ["-m", self.mcp_module],
+            # Shared with the built-in servers (`-P -m …`): a connector's MCP
+            # server has to survive the same working directory the agent runs
+            # in — including an app dir that ships its own `server.py`.
+            "args": mcp_module_argv(self.mcp_module),
             "env": {
                 **callback_env,
                 "OCTOPUS_INSTALLATION_ID": installation.id,

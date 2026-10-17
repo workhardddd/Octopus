@@ -10,6 +10,7 @@ import {
   useSessionStore,
   type CredentialInfo,
 } from "../stores/sessionStore";
+import { harnessLabel } from "../lib/harness";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
 import {
@@ -61,8 +62,12 @@ async function friendlyErrorMessage(
   return `Could not ${action} — HTTP ${res.status}`;
 }
 
-// The credential dialog is a small state machine spanning two backends:
-//   choose → (Claude: awaiting_code → submitting) | (Codex: device → polling)
+// The credential dialog is a small state machine spanning three backends:
+//   choose → (Claude OAuth: awaiting_code → submitting)
+//          | (Codex: device → polling)
+//          | (paste an API key — DSH has no login flow at all, and Claude
+//             takes a pasted key when the user runs it against a relay)
+type PasteBackend = "claude-code" | "dsh";
 type FlowState =
   | { kind: "idle" }
   | { kind: "choose" }
@@ -72,6 +77,8 @@ type FlowState =
   | { kind: "codex_label" }
   | { kind: "codex_starting" }
   | { kind: "codex_device"; loginId: string; url: string; code: string }
+  | { kind: "paste_key"; backend: PasteBackend }
+  | { kind: "paste_saving"; backend: PasteBackend }
   | { kind: "error"; message: string };
 
 export function HarnessPage({
@@ -90,6 +97,12 @@ export function HarnessPage({
   const [flow, setFlow] = useState<FlowState>({ kind: "idle" });
   const [label, setLabel] = useState("");
   const [code, setCode] = useState("");
+  // A pasted API key (DSH, or Claude against a relay). Held only while the
+  // dialog is open, and cleared after a successful save.
+  const [secret, setSecret] = useState("");
+  // Optional relay/self-hosted endpoint for a pasted key. Empty = the CLI's
+  // own default endpoint.
+  const [baseUrl, setBaseUrl] = useState("");
   const [copiedCode, setCopiedCode] = useState(false);
   // Set while re-authorizing an existing credential (harness-credential-reauth.md
   // §5): threads the target id through the login flow so the backend updates
@@ -133,6 +146,7 @@ export function HarnessPage({
   const openChooser = () => {
     setLabel("");
     setCode("");
+    setBaseUrl("");
     setFlow({ kind: "choose" });
     setOpen(true);
   };
@@ -141,6 +155,7 @@ export function HarnessPage({
     setOpen(false);
     setLabel("");
     setCode("");
+    setBaseUrl("");
     setCopiedCode(false);
     setReauthId(null);
     setFlow({ kind: "idle" });
@@ -152,12 +167,69 @@ export function HarnessPage({
     setReauthId(c.id);
     setLabel(c.label);
     setCode("");
+    setSecret("");
+    setBaseUrl(c.base_url ?? "");
     setCopiedCode(false);
     setOpen(true);
-    if (c.backend === "claude-code") {
+    if (c.backend === "claude-code" && c.auth_type === "oauth") {
       void startClaudeLogin();
+    } else if (c.backend === "dsh" || c.backend === "claude-code") {
+      // Nothing to negotiate for a pasted key: replacing it is pasting the
+      // new one (DSH has only this shape; a Claude api_key row is a relay).
+      setFlow({ kind: "paste_key", backend: c.backend });
     } else {
       void startCodexLogin(c.id, c.label);
+    }
+  };
+
+  // ---------------------------------------------------------------- pasted key
+
+  // DSH authenticates with an API key, and Claude Code takes one when it runs
+  // against a relay: there is no sign-in to drive, so the whole flow is "name
+  // it and paste it". Re-authorizing updates the existing row in place, which
+  // is the same contract the other two flows honour
+  // (harness-credential-reauth.md §5) — the alternative would mint a new
+  // credential and strand every agent bound to the dead one.
+  const savePastedKey = async (backend: PasteBackend) => {
+    if (!label.trim() || !secret.trim()) {
+      setFlow({
+        kind: "error",
+        message: "A label and an API key are both required",
+      });
+      return;
+    }
+    setFlow({ kind: "paste_saving", backend });
+    try {
+      const res = reauthId
+        ? await fetch(`${API}/${reauthId}`, {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({
+              label,
+              secret,
+              base_url: baseUrl.trim(),
+            }),
+          })
+        : await fetch(API, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              backend,
+              label,
+              auth_type: "api_key",
+              secret,
+              base_url: baseUrl.trim() || null,
+            }),
+          });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      await fetchCredentials();
+      setSecret("");
+      setReauthId(null);
+      handleOpenChange(false);
+    } catch (e) {
+      setFlow({ kind: "error", message: String(e) });
     }
   };
 
@@ -400,14 +472,14 @@ export function HarnessPage({
                       c.backend === "claude-code" ? "tile-warm" : "tile-blue"
                     }`}
                   >
-                    {c.backend === "claude-code" ? "◲" : "◼"}
+                    {c.backend === "claude-code" ? "◲" : c.backend === "dsh" ? "◆" : "◼"}
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="credential-label truncate text-[15px] font-semibold text-gray-950">
                       {c.label}
                     </div>
                     <div className="mt-1 font-mono text-[11.5px] text-gray-700">
-                      {c.backend === "claude-code" ? "Claude Code" : "Codex"} ·{" "}
+                      {harnessLabel(c.backend)} ·{" "}
                       {c.auth_type === "oauth" ? "OAuth" : "API key"}
                     </div>
                   </div>
@@ -479,7 +551,7 @@ export function HarnessPage({
                 <IconPlus size={16} />
               </span>
               <span className="text-[13px]">
-                Sign in to Claude Code or Codex
+                Add an engine credential
               </span>
             </button>
           )}
@@ -494,7 +566,8 @@ export function HarnessPage({
               Engines are decoupled from agents.
             </span>{" "}
             Memory, sessions and history live on the agent — swap an agent from
-            Claude Code to Codex without losing any of it.
+            one engine to another (Claude Code, Codex, DSH) without losing any
+            of it.
           </p>
         </div>
       </div>
@@ -507,6 +580,10 @@ export function HarnessPage({
               flow.kind === "codex_starting" ||
               flow.kind === "codex_device"
                 ? "Sign in with Codex"
+                : flow.kind === "paste_key" || flow.kind === "paste_saving"
+                ? flow.backend === "dsh"
+                  ? "Add a DSH API key"
+                  : "Add a Claude Code API key"
                 : flow.kind === "choose"
                 ? "Add a credential"
                 : "Sign in with Claude Code"}
@@ -518,13 +595,17 @@ export function HarnessPage({
                   flow.kind === "codex_starting" ||
                   flow.kind === "codex_device"
                 ? "Authorize Octopus with your ChatGPT account on any device."
+                : flow.kind === "paste_key" || flow.kind === "paste_saving"
+                ? flow.backend === "dsh"
+                  ? "DSH authenticates with a DeepSeek API key — there is no sign-in to drive."
+                  : "Paste a key for a relay or self-hosted endpoint — there is no sign-in to drive."
                 : "Octopus stores the resulting long-lived API key encrypted at rest."}
             </DialogDescription>
           </DialogHeader>
 
           {/* Step 0 — choose backend */}
           {flow.kind === "choose" && (
-            <div className="credential-choose grid grid-cols-2 gap-3">
+            <div className="credential-choose grid grid-cols-1 gap-3 sm:grid-cols-2">
               <button
                 type="button"
                 className="btn-choose-claude flex flex-col items-start gap-1 rounded-lg border border-border p-4 text-left hover:border-primary/60 hover:bg-accent/40 transition-colors"
@@ -549,6 +630,38 @@ export function HarnessPage({
                   Sign in with ChatGPT (device code).
                 </span>
               </button>
+              <button
+                type="button"
+                className="btn-choose-dsh flex flex-col items-start gap-1 rounded-lg border border-border p-4 text-left hover:border-primary/60 hover:bg-accent/40 transition-colors"
+                onClick={() => {
+                  setSecret("");
+                  setBaseUrl("");
+                  setFlow({ kind: "paste_key", backend: "dsh" });
+                }}
+              >
+                <span className="text-sm font-semibold text-foreground">
+                  DeepSeek (DSH)
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Paste a DeepSeek API key.
+                </span>
+              </button>
+              <button
+                type="button"
+                className="btn-choose-claude-key flex flex-col items-start gap-1 rounded-lg border border-border p-4 text-left hover:border-primary/60 hover:bg-accent/40 transition-colors"
+                onClick={() => {
+                  setSecret("");
+                  setBaseUrl("");
+                  setFlow({ kind: "paste_key", backend: "claude-code" });
+                }}
+              >
+                <span className="text-sm font-semibold text-foreground">
+                  Claude Code (API key)
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  Paste a key for a relay or self-hosted endpoint.
+                </span>
+              </button>
             </div>
           )}
 
@@ -558,6 +671,63 @@ export function HarnessPage({
               {flow.kind === "codex_starting"
                 ? "Asking Codex for a device code…"
                 : "Preparing OAuth login…"}
+            </div>
+          )}
+
+          {/* A pasted API key (DSH, or Claude against a relay); no sign-in to drive */}
+          {(flow.kind === "paste_key" || flow.kind === "paste_saving") && (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="dsh-label">Label</Label>
+                <Input
+                  id="dsh-label"
+                  placeholder={flow.backend === "dsh" ? "e.g. DeepSeek" : "e.g. My relay"}
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  autoFocus
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="dsh-secret">API key</Label>
+                <Input
+                  id="dsh-secret"
+                  className="dsh-api-key"
+                  type="password"
+                  placeholder="sk-…"
+                  value={secret}
+                  onChange={(e) => setSecret(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Stored encrypted at rest. It reaches the agent's{" "}
+                  {flow.backend === "dsh" ? "DSH" : "Claude Code"} process as{" "}
+                  <code>
+                    {flow.backend === "dsh" ? "DEEPSEEK_API_KEY" : "ANTHROPIC_AUTH_TOKEN"}
+                  </code>
+                  , so no agent home holds a copy of it on disk.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="cred-base-url">
+                  Base URL <span className="font-normal text-muted-foreground">(optional)</span>
+                </Label>
+                <Input
+                  id="cred-base-url"
+                  className="cred-base-url"
+                  type="url"
+                  placeholder={
+                    flow.backend === "dsh"
+                      ? "https://api.deepseek.com"
+                      : "https://relay.example"
+                  }
+                  value={baseUrl}
+                  onChange={(e) => setBaseUrl(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {flow.backend === "dsh"
+                    ? "Leave empty for the official DeepSeek endpoint. A relay address rides the process environment as DEEPSEEK_BASE_URL."
+                    : "Leave empty for Anthropic's own endpoint. A relay address rides the process environment as ANTHROPIC_BASE_URL, and the key is sent as a bearer token."}
+                </p>
+              </div>
             </div>
           )}
 
@@ -709,6 +879,17 @@ export function HarnessPage({
                 disabled={!label.trim()}
               >
                 Continue
+              </Button>
+            )}
+            {(flow.kind === "paste_key" || flow.kind === "paste_saving") && (
+              <Button
+                className="btn-dsh-save"
+                onClick={() => void savePastedKey(flow.backend)}
+                disabled={
+                  flow.kind === "paste_saving" || !label.trim() || !secret.trim()
+                }
+              >
+                {flow.kind === "paste_saving" ? "Saving…" : "Save key"}
               </Button>
             )}
             {flow.kind === "claude_awaiting_code" && (

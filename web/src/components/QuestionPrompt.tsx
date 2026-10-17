@@ -58,7 +58,7 @@ export function QuestionPrompt({ question, onSubmit }: Props) {
     <div className="msg msg-question rounded-lg border-[0.7px] border-primary/30 bg-card overflow-hidden">
       <div className="question-header flex items-center gap-2.5 px-3 py-2 bg-primary-50 text-sm text-foreground">
         <IconHelpCircle size={18} className="text-primary shrink-0" />
-        <strong>Claude is asking</strong>
+        <strong>The agent is asking</strong>
       </div>
       <div className="question-body px-3 py-3 space-y-5">
         {question.questions.map((q, i) => {

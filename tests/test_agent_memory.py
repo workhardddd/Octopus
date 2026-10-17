@@ -45,8 +45,10 @@ def test_ensure_agent_dirs_is_idempotent(agents_root):
 
 def test_uses_configured_agents_dir(tmp_path, monkeypatch):
     """`~` / settings override is honored at call time."""
+    from tests.capabilities import isolate_home
+
     monkeypatch.setattr(settings, "agents_dir", "~/.octopus/agents")
-    monkeypatch.setenv("HOME", str(tmp_path))
+    isolate_home(monkeypatch, tmp_path)
     assert agent_memory.agent_memory_dir("z") == tmp_path / ".octopus/agents/z/memory"
 
 

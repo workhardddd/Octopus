@@ -16,6 +16,7 @@ from typing import Any
 
 from . import agent_memory
 from .database import Database
+from .harness.registry import DEFAULT_BACKEND
 
 
 class AgentError(Exception):
@@ -47,7 +48,7 @@ class AgentManager:
         system_prompt: str = "",
         model: str | None = None,
         credential_id: str | None = None,
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         mcp_servers: list[str] | None = None,
         tool_allow: str = "",
         tool_deny: str = "",

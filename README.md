@@ -1,14 +1,16 @@
 # Octopus
 
-**Octopus is a personal agent platform.** It turns **Claude Code** and **Codex**
-into durable, always-on AI agents that run on your own machine and work for you
-around the clock — reachable from your phone, any browser, or Telegram.
+**Octopus is a personal agent platform.** It turns local agent CLIs — **DSH
+(DeepSeek Harness)**, **Claude Code** and **Codex** — into durable, always-on AI
+agents that run on your own machine and work for you around the clock —
+reachable from your phone, any browser, or Telegram.
 
 Each agent keeps its own persistent setup (prompt, model, tools, schedules,
 connectors), keeps work running in the background across turns, and can reach
-real third-party APIs. Octopus drives the `claude` / `codex` CLIs directly via
-their stream protocols, so there's **no extra API cost** — it uses your existing
-Claude and ChatGPT subscriptions (or an API key you attach).
+real third-party APIs. Octopus drives the CLIs directly — `dsh` over ACP,
+`claude` / `codex` over their stream protocols — so there's **no SDK dependency
+and no extra API cost**: DSH runs on a DeepSeek API key, and Claude Code / Codex
+use your existing subscriptions (or a key you attach).
 
 ## How It Works
 
@@ -16,7 +18,7 @@ Claude and ChatGPT subscriptions (or an API key you attach).
 Phone / Browser / Telegram
   → REST + WebSocket / bridge → FastAPI (web UI + API on one port)
       → Agent  (durable: prompt · model · credential · tool policy · connectors)
-          → backend:  Claude Code   or   Codex      (local CLI subprocess, stream-json)
+          → engine:  DSH   or   Claude Code   or   Codex   (local CLI subprocess)
           → MCP tools: bg · ask · ask_agent · connectors (GitHub / Gmail / custom)
 ```
 
@@ -27,15 +29,19 @@ Phone / Browser / Telegram
   schedules, and bridge bindings; edit an agent and its open sessions pick up
   the change on the next turn. The sidebar is two-pane: pick an agent, see its
   sessions.
-- **Two backends** — Run an agent on **Claude Code** or **Codex**, selectable
-  per session. Same chat UX, schedules, bridges, and in-app tools either way.
+- **Three engines** — Run an agent on **DSH (DeepSeek Harness)** — the default —
+  or on **Claude Code** / **Codex**, selectable per session. Same chat UX,
+  schedules, bridges, and in-app tools either way; each engine declares what it
+  does not do rather than failing quietly
+  ([the DSH column](docs/plans/dsh-harness.md)).
 - **Connectors** — Give agents OAuth access to third-party APIs as tools, set
   up entirely from the browser: built-in **GitHub** and **Gmail**, or define a
   **custom** connector for any OAuth2 API. Enabled per agent; client config +
   tokens encrypted at rest; the OAuth redirect URI is derived from your request
   so it works behind a tunnel. ([setup guide](docs/connectors-setup.md))
 - **Credentials** — Store backend API keys / OAuth logins in-app, encrypted at
-  rest (Fernet), and attach them per agent; falls back to the CLI's own login
+  rest (Fernet), and attach them per agent. DSH takes a DeepSeek API key;
+  Claude Code and Codex can fall back to the CLI's own login
   (`claude login` / `codex login`) when none is attached.
 - **Run from anywhere** — One command serves the API and web UI on a single
   port; reach it from any browser or phone. `octopus serve --tunnel` gives
@@ -176,17 +182,17 @@ octopus pull <session-id>      # Export an Octopus session as local JSONL
 
 ## Tech Stack
 
-**Backend**: Python 3.12 · FastAPI · `claude` + `codex` CLI subprocesses ·
+**Backend**: Python 3.12 · FastAPI · `dsh` + `claude` + `codex` CLI subprocesses ·
 aiosqlite · APScheduler · cryptography (Fernet) · MCP stdio servers
 **Frontend**: React 19 · TypeScript (strict) · Vite · zustand · Tailwind v4 · Radix
 
 ## Testing
 
 ```bash
-.venv/bin/pytest tests/ -v        # 882 backend tests (real-CLI tests run when `claude`/`codex` on PATH)
-cd web && bun run test            # 84 frontend unit tests (vitest)
+.venv/bin/pytest tests/ -v        # 1158 backend tests (real-CLI tests gate on their binary + credential)
+cd web && bun run test            # 200 frontend unit tests (vitest)
 cd web && npx tsc --noEmit        # TypeScript check
-cd web && bun run test:e2e        # 67 Playwright e2e tests (app · handoff/pull · telegram · agents · connectors · agent-collaboration · real-CLI). Split into `:fast` (35 UI-only, ~16s) and `:llm` (32 real Claude/Codex, ~3min) for dev iteration.
+cd web && bun run test:e2e        # 78 Playwright e2e tests (app · handoff/pull · telegram · agents · connectors · agent-collaboration · DSH · real-CLI). Split into `:fast` (41 UI-only, ~30s) and `:llm` (37 real DSH/Claude/Codex, ~3min) for dev iteration.
 ```
 
 ### Pre-commit hooks (optional)

@@ -428,7 +428,10 @@ export const useSessionStore = create<SessionStore>((set) => ({
   showChat: () =>
     set({ mainView: "chat", activeApplicationId: null, sidebarOpen: false }),
 
-  availableBackends: ["claude-code"],
+  // Placeholder until `/api/backends` answers. The server lists the default
+  // kind first and components read the default from there, so this only has to
+  // match it for the moment before the fetch resolves.
+  availableBackends: ["dsh"],
   setAvailableBackends: (availableBackends) => set({ availableBackends }),
 
   sessions: [],

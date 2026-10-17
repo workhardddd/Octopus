@@ -113,6 +113,10 @@ async function ensureAgent(
     data: {
       name,
       model: "haiku",
+      // Pinned: the delegation chain below is asserted on claude's behavior
+      // (and a haiku model), so this agent must not inherit whatever the
+      // registry's default kind happens to be.
+      backend: "claude-code",
       // Be permissive: the system prompt nudges Vera to reply tersely
       // so the reply-injection assertion has a stable target string.
       system_prompt:
@@ -151,7 +155,7 @@ test.describe("Agent-to-agent delegation @llm", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Delegation E2E", working_dir: "/tmp" },
+      data: { name: "Delegation E2E", working_dir: "/tmp", backend: "claude-code" },
     });
     expect(sessRes.ok()).toBeTruthy();
 

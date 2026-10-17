@@ -3,7 +3,13 @@
 Skipped unless the `codex` binary is on PATH. Starts a real
 `codex login --device-auth`, asserts we scrape a verification URL + one-time
 code from its live output, then cancels (no browser authorization happens, so
-nothing is actually logged in)."""
+nothing is actually logged in).
+
+A CLI that cannot open the flow at all — it exits non-zero before printing
+anything, as a logged-out `codex` does on a box whose auth endpoint is
+unreachable — skips with the CLI's own words. That is the suite's rule for an
+environmental CLI failure; the parse itself is covered against a fake CLI.
+"""
 
 import asyncio
 
@@ -26,6 +32,11 @@ async def test_real_codex_device_login_starts(tmp_path, monkeypatch):
     try:
         # start() is non-blocking; wait for the drive task to scrape the code.
         await asyncio.wait_for(session._scraped.wait(), 30)
+        if (
+            session.state == codex_login.CodexLoginState.error
+            and session.verification_url is None
+        ):
+            pytest.skip(f"codex could not start a device flow: {session.message}")
         assert session.verification_url
         assert session.verification_url.startswith("https://")
         assert session.user_code and "-" in session.user_code

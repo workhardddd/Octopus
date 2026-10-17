@@ -24,6 +24,26 @@ import os
 import shutil
 import subprocess
 
+from server.proc import kill_group, spawn_kwargs
+
+
+#: `subprocess.run` keywords for reading a CLI's output: **UTF-8, never the
+#: locale**.
+#:
+#: `text=True` alone decodes with the locale — GBK on a Chinese Windows — so a
+#: model reply or a CLI notice containing a byte GBK does not have raises
+#: `UnicodeDecodeError` inside `subprocess`'s reader thread. That kills the
+#: capture, leaves `proc.stdout` as `None`, and surfaces two frames later as
+#: `json.loads(None)` → "the JSON object must be str, bytes or bytearray, not
+#: NoneType", which reads like a test-logic bug rather than an unlucky
+#: character. The CLIs speak UTF-8; an undecodable byte becomes U+FFFD instead
+#: of a dead run.
+CLI_OUTPUT: dict[str, object] = {
+    "capture_output": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
 
 def _resolve_cli(binary: str) -> str | None:
     """Resolve a CLI honoring the same PATH fallback the harness uses (nvm /
@@ -53,26 +73,67 @@ def _probe(argv: list[str], *, timeout: float, cwd: str | None = None) -> bool:
     A loaded machine (a parallel suite, several CLIs mid-turn) can push a
     trivial call past its limit; one retry absorbs that. Two timeouts in a row
     is not load, and is reported rather than swallowed.
+
+    Two things here exist because of a measured session, where the gates turned
+    a twenty-minute test run into a mystery:
+
+    * **It says what it is doing.** A silent probe that takes four minutes looks
+      exactly like a hung test run, which is how a person ends up re-running
+      things and waiting twice.
+    * **A timeout kills the process GROUP.** `subprocess.run(timeout=…)` kills
+      only the direct child and then keeps reading its pipes until EOF, so a CLI
+      that leaves a grandchild behind overruns the deadline (measured on this
+      repo's own box: a 20s limit returned after 25.6s). The group kill is what
+      makes the stated limit true, which is what makes "90s then 180s" a bound
+      someone can reason about.
     """
-    last: Exception | None = None
-    for attempt, limit in enumerate((timeout, timeout * 2)):
+    last: str = "no attempt was made"
+    for limit in (timeout, timeout * 2):
         try:
-            proc = subprocess.run(
-                argv, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=limit, cwd=cwd,
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                **spawn_kwargs(),
             )
-            return proc.returncode == 0
-        except subprocess.TimeoutExpired as exc:
-            last = exc
-            continue
-        except OSError:
+        except OSError as exc:
             return False
+        try:
+            proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            _kill_probe(proc)
+            last = f"{' '.join(argv)} timed out after {limit:.0f}s"
+            print(f"[cli-gate] {last}; retrying once", flush=True)
+            continue
+        return proc.returncode == 0
     raise CliProbeTimeout(
         f"{argv[0]} did not answer a trivial probe within "
         f"{timeout:.0f}s or {timeout * 2:.0f}s. This is NOT a lapsed login — "
         f"tests must not be skipped on it. Re-run on a less loaded machine, "
         f"or fix the CLI. (last: {last})"
     )
+
+
+def _kill_probe(proc: subprocess.Popen) -> None:
+    """Stop a probe that overran, group first, then make sure it is reaped.
+
+    Every step is best-effort: a probe is advisory until it answers, and a
+    failure to clean up must not replace the gate's own diagnosis with an
+    unrelated OSError.
+    """
+    try:
+        kill_group(proc)
+    except Exception:
+        pass
+    try:
+        proc.communicate(timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 @functools.lru_cache(maxsize=1)
@@ -86,15 +147,47 @@ def claude_cli_works() -> bool:
     return _probe([exe, "--print", "--", "ok"], timeout=60)
 
 
+def _codex_logged_out(exe: str) -> bool:
+    """True when `codex login status` says so — cheaply, before any turn.
+
+    A logged-out `codex exec` does not always fail fast: on 0.115.0 a box with
+    no `~/.codex/auth.json` left the probe hanging with no output at all, which
+    burned its whole 90s+180s budget on the most ordinary state a dev machine
+    is in — and then aborted *collection* with `CliProbeTimeout`, so the whole
+    suite never ran. `login status` answers in milliseconds.
+
+    Only a definite answer short-circuits. Anything unexpected — a timeout, a
+    crash, a non-zero exit that is not the logged-out message — falls through
+    to the real probe, which is still the only thing that can tell us about an
+    *invalidated* token (`auth.json` present, rejected by the server).
+    """
+    try:
+        proc = subprocess.run(
+            [exe, "login", "status"], timeout=15, **CLI_OUTPUT
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode == 0:
+        return False
+    blob = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+    return "not logged in" in blob
+
+
 @functools.lru_cache(maxsize=1)
 def codex_cli_works() -> bool:
     """True only if `codex` is installed AND actually authenticated. A present
     `~/.codex/auth.json` is NOT sufficient — its token can be invalidated while
     the file lingers (a real 401 we hit in practice). So we probe with a tiny
     real `codex exec`, exactly like the claude gate; a logged-out CLI exits
-    non-zero, so dependent tests skip rather than hollow-pass/fail."""
+    non-zero, so dependent tests skip rather than hollow-pass/fail.
+
+    The explicit logged-out check comes first because that same logged-out CLI
+    can hang instead of exiting (see `_codex_logged_out`), which is a skip, not
+    the "we could not tell" that `CliProbeTimeout` exists to report."""
     exe = _resolve_cli("codex")
     if exe is None:
+        return False
+    if _codex_logged_out(exe):
         return False
     import tempfile
 
@@ -107,3 +200,29 @@ def codex_cli_works() -> bool:
         timeout=90,
         cwd=tempfile.gettempdir(),
     )
+
+
+@functools.lru_cache(maxsize=1)
+def dsh_cli_present() -> bool:
+    """True if the `dsh` binary resolves (honoring the harness's PATH
+    fallback). The shallow half of the DSH gate: enough for tests that only
+    need the CLI to exist (a rejected credential, for instance)."""
+    return _resolve_cli("dsh") is not None
+
+
+@functools.lru_cache(maxsize=1)
+def dsh_cli_works() -> bool:
+    """True if `dsh` is installed AND has a usable credential.
+
+    DSH authenticates with an API key rather than a login flow, so the key's
+    presence in the environment is what makes a turn possible. The probe is
+    deliberately shallow — `--version`, not a real turn — because a real turn
+    would need a `DSH_HOME`, and initializing one just to answer "is this CLI
+    usable" is slow, needs the network, and (against the default home) would
+    write a session into whatever the person running the tests uses DSH for.
+    Tests that need a turn check the key and then prove it by running one.
+    """
+    exe = _resolve_cli("dsh")
+    if exe is None or not os.environ.get("DEEPSEEK_API_KEY"):
+        return False
+    return _probe([exe, "--version"], timeout=60)

@@ -15,6 +15,8 @@ class SessionStatus(str, Enum):
 class BackendKind(str, Enum):
     claude_code = "claude-code"
     codex = "codex"
+    #: The DeepSeek Harness (docs/plans/dsh-harness.md).
+    dsh = "dsh"
 
 
 class CreateSessionRequest(BaseModel):
@@ -386,7 +388,9 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     model: str | None = None
     credential_id: str | None = None
-    backend: BackendKind = BackendKind.claude_code
+    # Which harness drives this agent. Defaults to the registry's default kind
+    # (`dsh`); the persisted value is the wire contract.
+    backend: BackendKind = BackendKind.dsh
     mcp_servers: list[str] = ["ask", "bg"]
     tool_allow: str = ""
     tool_deny: str = ""
@@ -460,6 +464,11 @@ class CredentialInfo(BaseModel):
     token_expires_at: str | None = None
     needs_reconnect: bool = False
     last_refresh_error_code: str | None = None
+    # Relay / self-hosted endpoint the harness renders into the subprocess
+    # env (ANTHROPIC_BASE_URL / DEEPSEEK_BASE_URL). Null = the CLI's own
+    # default endpoint. Rejected at the router for backends that cannot
+    # honor it (Codex's config.toml provider table).
+    base_url: str | None = None
 
 
 class CreateCredentialRequest(BaseModel):
@@ -467,11 +476,15 @@ class CreateCredentialRequest(BaseModel):
     label: str
     auth_type: AuthType = AuthType.api_key
     secret: str = Field(min_length=1)
+    base_url: str | None = None
 
 
 class UpdateCredentialRequest(BaseModel):
     label: str | None = None
     secret: str | None = Field(default=None, min_length=1)
+    # "" clears the endpoint; null leaves it untouched (the route's
+    # omit-means-keep convention for nullable fields).
+    base_url: str | None = None
 
 
 # Connectors (connectors.md). Installations are global; enablement is

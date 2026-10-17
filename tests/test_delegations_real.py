@@ -13,6 +13,11 @@ a fresh LLM turn — we're testing the chain primitive, not the
 parent's reply. This keeps each test to one real LLM call per real
 agent in the chain.
 
+Every session and agent here states its `backend` outright. The suite's real-CLI
+dependency is `claude` (or `codex`), so inheriting the registry's default kind
+would silently move these turns onto whatever that default is — and onto a
+different credential.
+
 A real FastAPI **is** served for each test, on an ephemeral port that
 `settings.port` is pointed at, carrying the two routers the in-turn MCP
 shims call back into: `questions` (for `mcp__ask__user`) and `delegations`
@@ -203,7 +208,8 @@ async def test_real_two_hop_claude_to_claude(tmp_path, monkeypatch):
         assert octo is not None
         await am.create_agent(name="Vera", model="haiku", backend="claude-code")
         octo_sess = await mgr.create_session(
-            agent_id=octo["id"], name="octo", working_dir=wd
+            agent_id=octo["id"], name="octo", working_dir=wd,
+            backend="claude-code",
         )
 
         captured = _intercept_parent_injections(mgr, octo_sess.id)
@@ -255,7 +261,8 @@ async def test_real_question_loop_claude_to_claude(tmp_path, monkeypatch):
         # and let a genuine routing regression fail loudly.
         await am.create_agent(name="Vera", model="sonnet", backend="claude-code")
         octo_sess = await mgr.create_session(
-            agent_id=octo["id"], name="octo", working_dir=wd
+            agent_id=octo["id"], name="octo", working_dir=wd,
+            backend="claude-code",
         )
 
         captured = _intercept_parent_injections(mgr, octo_sess.id)
@@ -339,7 +346,8 @@ async def test_real_two_hop_claude_to_codex(tmp_path, monkeypatch):
         # Vera runs codex; we leave model None so codex's default applies.
         await am.create_agent(name="Vera", backend="codex")
         octo_sess = await mgr.create_session(
-            agent_id=octo["id"], name="octo", working_dir=wd
+            agent_id=octo["id"], name="octo", working_dir=wd,
+            backend="claude-code",
         )
 
         captured = _intercept_parent_injections(mgr, octo_sess.id)
@@ -385,7 +393,8 @@ async def test_real_three_hop_chain(tmp_path, monkeypatch):
         await am.create_agent(name="Vera", model="haiku", backend="claude-code")
         await am.create_agent(name="Pete", model="haiku", backend="claude-code")
         octo_sess = await mgr.create_session(
-            agent_id=octo["id"], name="octo", working_dir=wd
+            agent_id=octo["id"], name="octo", working_dir=wd,
+            backend="claude-code",
         )
 
         captured = _intercept_parent_injections(mgr, octo_sess.id)

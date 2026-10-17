@@ -9,6 +9,8 @@ from typing import Any
 
 import aiosqlite
 
+from .harness.registry import DEFAULT_BACKEND
+
 logger = logging.getLogger(__name__)
 
 # Built-in MCP servers attached to the Default Agent (and the default for
@@ -189,7 +191,8 @@ CREATE TABLE IF NOT EXISTS backend_credentials (
     status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
     token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys
     needs_reconnect INTEGER NOT NULL DEFAULT 0,
-    last_refresh_error_code TEXT           -- see oauth_errors.RefreshErrorCode
+    last_refresh_error_code TEXT,          -- see oauth_errors.RefreshErrorCode
+    base_url TEXT                           -- relay/self-hosted endpoint; null = the CLI's own default
 );
 
 CREATE INDEX IF NOT EXISTS idx_credentials_backend
@@ -450,6 +453,7 @@ class Database:
             "needs_reconnect INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE backend_credentials ADD COLUMN "
             "last_refresh_error_code TEXT",
+            "ALTER TABLE backend_credentials ADD COLUMN base_url TEXT",
         ):
             try:
                 await self._conn.execute(ddl)
@@ -756,12 +760,17 @@ class Database:
         if row is None:
             default_id = uuid.uuid4().hex[:12]
             now = datetime.now(timezone.utc).isoformat()
+            # `backend` is written out rather than left to the column default:
+            # the SQL default stays 'claude-code' so pre-existing rows keep
+            # working, which would otherwise make a *fresh* install seed its
+            # first agent on an engine that is no longer the default kind
+            # (dsh-harness.md §3.8).
             await self._conn.execute(
                 "INSERT INTO agents "
-                "(id, name, description, system_prompt, mcp_servers, "
+                "(id, name, description, system_prompt, mcp_servers, backend, "
                 " is_system, created_at, updated_at) "
-                "VALUES (?, 'Octo', '', '', ?, 1, ?, ?)",
-                (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now),
+                "VALUES (?, 'Octo', '', '', ?, ?, 1, ?, ?)",
+                (default_id, _DEFAULT_MCP_SERVERS_JSON, DEFAULT_BACKEND, now, now),
             )
         else:
             default_id = row[0]
@@ -897,7 +906,7 @@ class Database:
         credential_id: str | None = None,
         agent_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
@@ -1364,6 +1373,7 @@ class Database:
         "c.token_expires_at",
         "c.needs_reconnect",
         "c.last_refresh_error_code",
+        "c.base_url",
     )
 
     def _row_to_credential(self, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -1378,6 +1388,7 @@ class Database:
             "token_expires_at": row[7],
             "needs_reconnect": bool(row[8]),
             "last_refresh_error_code": row[9],
+            "base_url": row[10],
         }
 
     async def save_credential(
@@ -1388,14 +1399,23 @@ class Database:
         auth_type: str,
         secret_encrypted: str,
         created_at: str,
+        base_url: str | None = None,
     ) -> None:
         await self._ensure_connected()
         await self._conn.execute(
             "INSERT INTO backend_credentials "
             "(id, backend, label, auth_type, secret_encrypted, created_at, "
-            " status, needs_reconnect) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', 0)",
-            (credential_id, backend, label, auth_type, secret_encrypted, created_at),
+            " status, needs_reconnect, base_url) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?)",
+            (
+                credential_id,
+                backend,
+                label,
+                auth_type,
+                secret_encrypted,
+                created_at,
+                base_url,
+            ),
         )
         await self._conn.execute(
             "INSERT OR REPLACE INTO credential_secrets "
@@ -1437,11 +1457,12 @@ class Database:
             "token_expires_at",
             "needs_reconnect",
             "last_refresh_error_code",
+            "base_url",
         }
         # Nullable columns need to be writable to NULL (e.g. clearing a
         # stale `last_refresh_error_code` after a successful refresh).
         # Callers that want to leave a column alone should just not pass it.
-        nullable_meta = {"token_expires_at", "last_refresh_error_code"}
+        nullable_meta = {"token_expires_at", "last_refresh_error_code", "base_url"}
         meta_updates = {
             k: v
             for k, v in fields.items()
@@ -2011,7 +2032,7 @@ class Database:
         system_prompt: str = "",
         model: str | None = None,
         credential_id: str | None = None,
-        backend: str = "claude-code",
+        backend: str = DEFAULT_BACKEND,
         mcp_servers: list[str] | None = None,
         tool_allow: str = "",
         tool_deny: str = "",
@@ -2030,7 +2051,7 @@ class Database:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
             (
                 agent_id, name, description, avatar, system_prompt, model,
-                credential_id, backend or "claude-code", servers_json,
+                credential_id, backend or DEFAULT_BACKEND, servers_json,
                 tool_allow, tool_deny, int(bool(is_system)),
                 created_at, updated_at, json.dumps(subagents or []),
             ),

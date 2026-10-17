@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconCheck, IconPlus, IconSubtask, IconX } from "@tabler/icons-react";
 import { fetchInstallations } from "../api/connectors";
+import { defaultHarnessKind, harnessLabel } from "../lib/harness";
 import { selectSession } from "../lib/selectSession";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
@@ -129,7 +130,10 @@ export function SidebarAgents() {
     setFormAgentId(agentId);
     setNewName("");
     setWorkingDir("");
-    setFormBackend(agents.find((a) => a.id === agentId)?.backend ?? "claude-code");
+    setFormBackend(
+      agents.find((a) => a.id === agentId)?.backend ??
+        defaultHarnessKind(availableBackends),
+    );
     setFormCredentialId("");
     setShowAdvanced(false);
   };
@@ -324,7 +328,7 @@ export function SidebarAgents() {
                             >
                               {availableBackends.map((b) => (
                                 <option key={b} value={b}>
-                                  {b === "claude-code" ? "Claude Code" : "Codex"}
+                                  {harnessLabel(b)}
                                 </option>
                               ))}
                             </select>

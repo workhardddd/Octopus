@@ -50,12 +50,17 @@ async def run_web_leaf(
     working_dir: str,
     credential: HarnessCredential | None,
     model: str | None,
+    agent_id: str | None = None,
     timeout: float = 120.0,
 ) -> LeafResult:
     """Run one isolated, web-enabled, read-only-ish sub-turn and return its
     final text. Side-effect-contained: empty MCP set, no connectors/memory,
     `web_research=True`. Bounded by `timeout`; the process group is reaped on
-    stop (turn-safety.md §2)."""
+    stop (turn-safety.md §2).
+
+    `agent_id` names the agent this leaf belongs to. A harness that keeps
+    per-agent state on disk (DSH's home and its scoped patch) derives it from
+    that; every other kind ignores it."""
     config = RunConfig(
         session_id=None,        # no callback env → no bg/ask/ask_agent wiring
         system_prompt=_LEAF_SYSTEM,
@@ -66,6 +71,7 @@ async def run_web_leaf(
         connectors=[],
         memory_dir=None,
         web_research=True,
+        agent_id=agent_id,
     )
     run = harness.create_run(config)
     parts: list[str] = []
@@ -110,12 +116,18 @@ async def run_reason_leaf(
     credential: HarnessCredential | None,
     model: str | None,
     working_dir: str | None,
+    agent_id: str | None = None,
     timeout: float = 90.0,
 ) -> LeafResult:
     """Run one tool-free reasoning call (`run_oneshot`) — scope decompose /
-    synthesize. Backend-agnostic; never raises."""
+    synthesize. Backend-agnostic; never raises. `agent_id` is the owning agent,
+    for a harness that keeps per-agent state on disk (see `run_web_leaf`)."""
     ctx = OneShotContext(
-        prompt=prompt, model=model, credential=credential, working_dir=working_dir
+        prompt=prompt,
+        model=model,
+        credential=credential,
+        working_dir=working_dir,
+        agent_id=agent_id,
     )
     try:
         text = await harness.run_oneshot(ctx, timeout=timeout)

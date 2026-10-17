@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { IconArchive, IconPlus, IconTrash } from "@tabler/icons-react";
 import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
 import {
+  defaultHarnessKind,
+  harnessChoices,
+  harnessLabel,
+} from "../lib/harness";
+import {
   useSessionStore,
   type Agent,
   type SubagentDefinition,
@@ -51,8 +56,15 @@ export function AgentFormPage({
   const [description, setDescription] = useState("");
   const [avatar, setAvatar] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [backend, setBackend] = useState("claude-code");
+  const [backend, setBackend] = useState(() =>
+    defaultHarnessKind(useSessionStore.getState().availableBackends),
+  );
   const [credentialId, setCredentialId] = useState("");
+  // The model this agent runs on — `--model` / `-m` / DSH's ACP model
+  // selection. Empty = the harness's own default. Free text on purpose: the
+  // valid ids are whatever the chosen endpoint serves, and the server passes
+  // the string through verbatim.
+  const [model, setModel] = useState("");
   const [toolAllow, setToolAllow] = useState("");
   const [toolDeny, setToolDeny] = useState("");
   const [enabledConnectors, setEnabledConnectors] = useState<string[]>([]);
@@ -74,8 +86,9 @@ export function AgentFormPage({
     setDescription(editing?.description ?? "");
     setAvatar(editing?.avatar ?? "");
     setSystemPrompt(editing?.system_prompt ?? "");
-    setBackend(editing?.backend ?? "claude-code");
+    setBackend(editing?.backend ?? defaultHarnessKind(availableBackends));
     setCredentialId(editing?.credential_id ?? "");
+    setModel(editing?.model ?? "");
     setToolAllow(editing?.tool_allow ?? "");
     setToolDeny(editing?.tool_deny ?? "");
     setSubagents(editing?.subagents ?? []);
@@ -120,6 +133,7 @@ export function AgentFormPage({
       avatar: avatar.trim() || null,
       system_prompt: systemPrompt,
       credential_id: credentialId || null,
+      model: model.trim() || null,
       backend,
       tool_allow: toolAllow,
       tool_deny: toolDeny,
@@ -312,7 +326,7 @@ export function AgentFormPage({
                     </span>
                   </Label>
                   <div className="agent-backend-select grid grid-cols-2 gap-3" role="radiogroup">
-                    {["claude-code", "codex"].map((b) => {
+                    {harnessChoices(availableBackends).map((b) => {
                       const picked = backend === b;
                       const usable = availableBackends.includes(b);
                       return (
@@ -330,7 +344,7 @@ export function AgentFormPage({
                           }}
                           role="radio"
                           aria-checked={picked}
-                          title={usable ? undefined : `${b} is not installed here`}
+                          title={usable ? undefined : `${harnessLabel(b)} is not installed here`}
                         >
                           <span className="flex items-center gap-2">
                             <span
@@ -343,7 +357,7 @@ export function AgentFormPage({
                                 picked ? "font-semibold text-primary" : "text-gray-900"
                               }`}
                             >
-                              {b === "claude-code" ? "Claude Code" : "Codex"}
+                              {harnessLabel(b)}
                             </span>
                           </span>
                         </button>
@@ -368,6 +382,31 @@ export function AgentFormPage({
                     from Harness · memory lives on the agent, survives engine
                     swaps
                   </p>
+                  <div className="space-y-1.5 pt-2">
+                    <Label htmlFor="agent-model">
+                      Model
+                      <span className="ml-2 font-normal text-gray-700">
+                        empty = harness default
+                      </span>
+                    </Label>
+                    <Input
+                      id="agent-model"
+                      className="agent-model-input"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder={
+                        backend === "claude-code"
+                          ? "e.g. claude-sonnet-4-5"
+                          : backend === "dsh"
+                          ? "e.g. deepseek-v4-pro or provider/model"
+                          : "e.g. gpt-5.1-codex"
+                      }
+                    />
+                    <p className="font-mono text-[11px] text-gray-700">
+                      sent to the engine verbatim — use an id your endpoint
+                      serves
+                    </p>
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -448,6 +487,18 @@ export function AgentFormPage({
                   />
                 </div>
               </div>
+
+              {backend === "dsh" && (
+                // A declared degradation has to be visible where the user would
+                // otherwise assume the setting works (dsh-harness.md §10).
+                <p className="text-xs text-muted-foreground">
+                  Neither field below is enforced on DSH: it composes its tool
+                  set per process, and ACP has no per-turn tool policy — so the
+                  allow/deny list applies on Claude Code, and there is no
+                  equivalent of its <code>--agents</code> either. DSH's own
+                  sub-agent tool stays available to it.
+                </p>
+              )}
 
               <SubagentEditor value={subagents} onChange={setSubagents} />
             </div>

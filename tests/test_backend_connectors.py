@@ -53,7 +53,7 @@ def test_claude_merges_connector_mcp_entry():
     cfg = json.loads(_arg_after(argv, "--mcp-config"))["mcpServers"]
     key = conn.mcp_key(inst)  # dummy_abcdef
     assert key in cfg
-    assert cfg[key]["args"] == ["-m", "server.mcp_servers.connectors.dummy"]
+    assert cfg[key]["args"] == ["-P", "-m", "server.mcp_servers.connectors.dummy"]
     # Token env: shared callback vars + the installation id.
     assert cfg[key]["env"]["OCTOPUS_INSTALLATION_ID"] == inst.id
     assert cfg[key]["env"]["OCTOPUS_API_BASE"].startswith("http://127.0.0.1:")

@@ -264,7 +264,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Pull No Claude ID" },
+      data: { name: "Pull No Claude ID", backend: "claude-code" },
     });
     expect(createRes.ok()).toBeTruthy();
     const created = await createRes.json();
@@ -477,7 +477,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name },
+        data: { name, backend: "claude-code" },
       });
       const created = await createRes.json();
       createdIds.push(created.id);

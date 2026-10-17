@@ -23,6 +23,28 @@ from .profile import McpServerEntry
 # import resolves regardless of the child's cwd.
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
+
+def mcp_module_argv(module: str) -> list[str]:
+    """argv that launches one of Octopus's own MCP servers as a module.
+
+    `-P` is load-bearing, not decoration. Under `-m`, Python prepends the
+    *child's* current directory to `sys.path`, and the child runs in the
+    session's working directory — which, for an Application, is the app's own
+    directory. An ordinary Python app ships a `server.py`, which then shadows
+    our `server` package, so every built-in MCP server dies on start with
+    `No module named 'server.mcp_servers'; 'server' is not a package` and the
+    agent loses its tools (seen for real: an app whose working dir held
+    `server.py` failed *every* turn with a bare "Internal error", because the
+    engine reports a dead MCP server as exactly that).
+
+    `-P` drops that prepend. `PYTHONPATH` — always set by
+    `build_callback_env` — is still honoured, so the repo root stays the only
+    place the package can come from. Both halves matter: `-P` alone would
+    break if the env were ever dropped, and the env alone loses to the cwd.
+    """
+    return ["-P", "-m", module]
+
+
 # In-app MCP servers the agent can enable (subset of these; None = all).
 _BUILTIN_MODULES = {
     "bg": "server.mcp_servers.bg",
@@ -68,22 +90,22 @@ def select_mcp_servers(
     builtin_specs: dict[str, dict[str, Any]] = {
         "bg": {
             "command": sys.executable,
-            "args": ["-m", _BUILTIN_MODULES["bg"]],
+            "args": mcp_module_argv(_BUILTIN_MODULES["bg"]),
             "env": dict(callback_env),
         },
         "ask": {
             "command": sys.executable,
-            "args": ["-m", _BUILTIN_MODULES["ask"]],
+            "args": mcp_module_argv(_BUILTIN_MODULES["ask"]),
             "env": dict(callback_env),
         },
         "ask_agent": {
             "command": sys.executable,
-            "args": ["-m", _BUILTIN_MODULES["ask_agent"]],
+            "args": mcp_module_argv(_BUILTIN_MODULES["ask_agent"]),
             "env": dict(callback_env),
         },
         "research": {
             "command": sys.executable,
-            "args": ["-m", _BUILTIN_MODULES["research"]],
+            "args": mcp_module_argv(_BUILTIN_MODULES["research"]),
             "env": dict(callback_env),
         },
     }

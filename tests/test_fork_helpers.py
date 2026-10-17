@@ -13,6 +13,7 @@ import pytest
 from server.database import Database
 from server import fork_helpers as fh
 from server.models import MessageContent, MessageRole
+from tests.cli_gate import CLI_OUTPUT
 
 
 # ------------------------------------------------------------------ fixtures
@@ -185,7 +186,7 @@ def test_first_turn_note_reverted_phrasing():
 
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True,
-                   capture_output=True, text=True)
+                   **CLI_OUTPUT)
 
 
 @pytest.fixture
@@ -235,7 +236,7 @@ async def test_safe_revert_runs_when_clean_and_head_matches(git_repo):
     assert (git_repo / "a.py").read_text() == "v1\n"  # restored
     # The agent edit is recoverable in a stash.
     out = subprocess.run(["git", "stash", "list"], cwd=git_repo,
-                         capture_output=True, text=True).stdout
+                         **CLI_OUTPUT).stdout
     assert "octopus: pre-fork stash fork123" in out
 
 
@@ -251,7 +252,7 @@ async def test_safe_revert_removes_untracked_agent_file(git_repo):
     assert record["status"] == "completed", record
     assert not (git_repo / "notes.txt").exists()  # removed → fork-point state
     out = subprocess.run(["git", "stash", "list"], cwd=git_repo,
-                         capture_output=True, text=True).stdout
+                         **CLI_OUTPUT).stdout
     assert "octopus: pre-fork stash fork-unt" in out
 
 
