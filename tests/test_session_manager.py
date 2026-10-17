@@ -2400,6 +2400,45 @@ async def test_a_turn_that_never_starts_reports_its_own_error(manager, monkeypat
     assert events[0]["code"] == "turn_no_result"
     # The engine's own words are carried, so the bubble is actionable.
     assert "could not be started" in events[0]["message"]
+    # …and the shaped-for-a-dead-turn advice is not, because nothing was ever
+    # sent to a model.
+    assert "could not start this turn" in events[0]["message"]
+    assert "Check the credential" not in events[0]["message"]
+
+
+async def test_an_unclassified_engine_error_is_quoted_rather_than_denied(
+    manager, monkeypatch
+):
+    """An engine that *does* report a reason must not be described as having
+    reported nothing.
+
+    Found for real: a DSH turn failed with `Internal error: turn failed: unknown
+    prompt variable "{{cwd}}" …`, which no classifier recognised — so the bubble
+    said "ended the turn without an answer and without reporting why. Check the
+    credential", pointing the reader at a credential that was fine.
+    """
+    from server.harness import HarnessEvent
+
+    session = await _new(manager, "Unclassified")
+
+    engine_words = (
+        f'Internal error: turn failed: unknown prompt variable "{{{{cwd}}}}" '
+        "in section \"deployment:persona-suffix\"; registered variables: "
+        "provider, model (code -32603)"
+    )
+    backend = _SeqBackend(
+        events=[HarnessEvent(type="error", content=engine_words, is_error=True)]
+    )
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: backend)
+
+    events = [e async for e in manager._run_backend(session, "go")]
+
+    reported = [e for e in events if e.get("code") == "turn_no_result"]
+    assert reported, f"the turn was not reported: {[e.get('type') for e in events]}"
+    message = reported[0]["message"]
+    assert "could not classify" in message
+    assert "Check the credential" not in message
+    assert "unknown prompt variable" in message
 
 
 async def test_a_resume_the_engine_refuses_is_recovered_not_reported(

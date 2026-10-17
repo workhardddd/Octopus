@@ -2673,7 +2673,10 @@ class SessionManager:
             # key starts, accepts the prompt, and ends the turn with nothing.
             if turn_failed:
                 yield await self._surface_turn_failed(
-                    session, backend=harness.backend, detail=error_blob
+                    session,
+                    backend=harness.backend,
+                    detail=error_blob,
+                    start_failed=start_failed,
                 )
             return
 
@@ -3204,6 +3207,7 @@ class SessionManager:
                 backend=row["backend"],
                 auth_type="oauth",
                 secret=access_token,
+                base_url=row.get("base_url"),
             )
 
         # Either auth_type=api_key OR legacy auth_type=oauth where the
@@ -3213,6 +3217,7 @@ class SessionManager:
             backend=row["backend"],
             auth_type="api_key",
             secret=plaintext,
+            base_url=row.get("base_url"),
         )
 
     async def _refresh_oauth_if_needed(
@@ -3535,7 +3540,12 @@ class SessionManager:
         return event
 
     async def _surface_turn_failed(
-        self, session: Session, *, backend: str, detail: str = ""
+        self,
+        session: Session,
+        *,
+        backend: str,
+        detail: str = "",
+        start_failed: bool = False,
     ) -> dict[str, Any]:
         """Report a turn that ended with no result and no error the classifier
         recognised.
@@ -3545,14 +3555,32 @@ class SessionManager:
         silence: the status flipped back to idle and the user was left looking
         at their own message with no explanation at all. Whatever we know goes
         into the message; the raw tail goes to the log.
+
+        Three shapes, because they call for three different reactions. A turn
+        that never started does not want a credential check; a turn whose
+        engine *did* say something does not want to be told it said nothing
+        (an unclassified error — the ACP turn failure that carried "unknown
+        prompt variable …" was one — reads as "without reporting why, check the
+        credential", which sent the reader looking in the wrong place).
         """
         display = self._BACKEND_DISPLAY.get(backend, backend)
-        human = (
-            f"The {display} backend ended the turn without an answer and without "
-            "reporting why. Check the credential attached to this agent, then "
-            "try again."
-        )
         detail = detail.strip()
+        if start_failed:
+            human = (
+                f"The {display} backend could not start this turn, so nothing "
+                "was sent to the model."
+            )
+        elif detail:
+            human = (
+                f"The {display} backend failed this turn, for a reason Octopus "
+                "could not classify. Its own words are below."
+            )
+        else:
+            human = (
+                f"The {display} backend ended the turn without an answer and without "
+                "reporting why. Check the credential attached to this agent, then "
+                "try again."
+            )
         if detail:
             # We do have *something* to say — a start failure's exception, the
             # engine's stderr — and the user is otherwise left guessing. A

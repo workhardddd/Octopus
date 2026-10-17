@@ -19,6 +19,7 @@ from server import session_manager as sm
 from server.session_manager import ForkError, QueuedPrompt, SessionManager
 from server.delegations import DelegationRunState, delegation_manager
 from tests.capabilities import isolate_home
+from tests.cli_gate import CLI_OUTPUT
 from tests.fake_run import FakeRunBase
 
 
@@ -442,7 +443,7 @@ async def test_unarchive_restores_fork_fields(manager):
 
 
 def _git(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *args], cwd=cwd, check=True, **CLI_OUTPUT)
 
 
 @pytest.mark.asyncio
@@ -457,7 +458,7 @@ async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "init")
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
-                          capture_output=True, text=True).stdout.strip()
+                          **CLI_OUTPUT).stdout.strip()
 
     agent = await manager.db.get_system_agent()
     parent = await manager.create_session(agent["id"], "P", str(repo),

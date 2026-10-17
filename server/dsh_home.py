@@ -24,6 +24,13 @@ Three things follow from DSH's own rules, verified against the installed CLI:
   chain), so the canonical memory dir gets an `AGENTS.md` symlink to its
   `MEMORY.md`: one file under two names, which is what keeps "memory lives on
   the agent and survives an engine swap" true.
+* **A persona is prose, not a template.** DSH hands the persona to the prompt
+  registry as a *section*, and sections interpolate `{{name}}` references —
+  while the loop registers exactly two variables, `provider` and `model`. So
+  the patch emits no `personaSuffix` (the working directory arrives as literal
+  runtime context anyway) and a persona containing a reference is refused at
+  spawn instead of aborting prompt assembly inside the turn, which the engine
+  can only report as a bare "Internal error".
 
 The profile workspace is the exception to per-agent isolation: DSH materializes
 a plugin workspace inside `$DSH_HOME/profiles/<name>` on first boot (slow, and
@@ -35,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -88,7 +96,10 @@ _LEAF_DISABLED_ROWS = (
     "tool-subagent-fork",
     "tool-workflow",
     "tool-goal",
-    "tool-ralph",
+    # Mounting a plugin is another way to acquire a shell, so it is a
+    # capability row like the rest. (`tool-ralph` is gone as of 0.2.1 — the
+    # conformance test is what reports a row that stopped existing.)
+    "tool-plugin-manager",
 )
 
 #: The provider route a bare model id belongs to. DSH's first-party route; any
@@ -169,27 +180,32 @@ def patch_path(agent_id: str, signature: str) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def ensure_agent_home(agent_id: str) -> Path:
+def ensure_agent_home(agent_id: str, model: str | None = None) -> Path:
     """Create the agent's DSH home and everything DSH expects to find in it.
 
     Idempotent: called before every turn, so a home deleted out from under us
     (or never created, for an agent that predates this harness) is rebuilt.
+    `model` is the agent's chosen route: a bare id DSH's shipped catalog does
+    not list is declared here, because that catalog *replaces* the plugin's
+    built-in one and an undeclared route is refused at selection
+    (`dsh-acp`: "model … does not declare image input" — see
+    `_catalog_for`).
     """
     home = agent_home(agent_id)
     home.mkdir(parents=True, exist_ok=True)
-    write_settings(home)
+    write_settings(home, model)
     _link_shared_profiles(home)
     agent_memory.ensure_agent_dirs(agent_id)
     _link_memory_view(agent_id)
     return home
 
 
-def ensure_oneshot_home() -> Path:
+def ensure_oneshot_home(model: str | None = None) -> Path:
     """The home a one-shot with no owning agent runs in. Shared, because there
     is no agent to isolate it from and nothing here outlives the call."""
     home = oneshot_home()
     home.mkdir(parents=True, exist_ok=True)
-    write_settings(home)
+    write_settings(home, model)
     _link_shared_profiles(home)
     return home
 
@@ -298,26 +314,39 @@ def remove_agent_home(agent_id: str) -> None:
 
 
 def purge_session_store(agent_id: str, resume_id: str | None) -> None:
-    """Remove one DSH session's log directory, if this agent has it.
+    """Remove one DSH session: its log directory and its cached projection.
 
     DSH has no deletion API — its own README says nothing deletes session
     files — so Octopus's hard session delete is the only thing that keeps the
-    store from growing forever. Best-effort: the layout is
-    `<home>/sessions/--<cwd>--/<session id>/`, the cwd component is a lossy
-    encoding of a path we are not given here, so the id is what we search for.
+    store from growing forever. Two artifacts belong to one conversation, and
+    both are per-session files under the agent's home:
+
+    * `<home>/sessions/--<cwd>--/<session id>/` — the transcript. The cwd
+      component is a lossy encoding of a path we are not given here, so the id
+      is what we search for.
+    * `<home>/storages/session_projcache/sessions/<id>.json` — the derived
+      projection the session list is built from. Deleting a cache costs, at
+      worst, one recomputation; leaving it behind is a file per deleted session
+      that nothing else would ever collect.
     """
     if not resume_id:
         return
-    sessions = agent_home(agent_id) / "sessions"
-    if not sessions.is_dir():
-        return
-    for project in sessions.iterdir():
-        candidate = project / resume_id
-        if candidate.is_dir():
-            shutil.rmtree(candidate, ignore_errors=True)
-            logger.info(
-                "removed the DSH session store for %s (%s)", resume_id, candidate
-            )
+    home = agent_home(agent_id)
+    sessions = home / "sessions"
+    if sessions.is_dir():
+        for project in sessions.iterdir():
+            candidate = project / resume_id
+            if candidate.is_dir():
+                shutil.rmtree(candidate, ignore_errors=True)
+                logger.info(
+                    "removed the DSH session store for %s (%s)", resume_id, candidate
+                )
+    cached = (
+        home / "storages" / "session_projcache" / "sessions" / f"{resume_id}.json"
+    )
+    if cached.is_file():
+        cached.unlink(missing_ok=True)
+        logger.info("removed the cached DSH projection for %s (%s)", resume_id, cached)
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +366,51 @@ def _block_scalar(text: str, indent: int) -> str:
     return "\n".join(f"{pad}{line}" if line else "" for line in lines)
 
 
+#: The prompt variables DSH's loop registers, and therefore the whole universe a
+#: persona could legally name (`dsh-system-prompt`: "The loop supplies `provider`
+#: and `model`; plugins can register the facts they own" — and no plugin Octopus
+#: mounts registers one).
+_PROMPT_VARIABLES = ("provider", "model")
+
+#: A prompt-variable reference: the `{{name}}` group `dsh-system-prompt`
+#: interpolates. Matched as written (`[^{}]*` inside) because that is the
+#: engine's own grammar — a group it cannot parse is a hard failure too, but
+#: with a different message, and neither belongs in a persona.
+_PROMPT_REFERENCE = re.compile(r"\{\{[^{}]*\}\}")
+
+
+def _refuse_prompt_references(persona: str) -> None:
+    """Refuse a persona, rather than a turn, that reads like a template.
+
+    `dsh-persona` registers the persona as a prompt *section*, and sections
+    interpolate `{{name}}` by default; the loop registers only `provider` and
+    `model`. Anything else — an unknown name, or a group the grammar cannot
+    parse — throws inside `renderPrompt`, i.e. before the model is asked
+    anything, and the ACP client can only report it as `Internal error: turn
+    failed: …`. Found for real: a `personaSuffix` we generated (“Your working
+    directory is {{cwd}}.”) made *every* DSH turn fail the moment DSH 0.2.1
+    stopped registering `cwd` (0.2.1-rc.2).
+
+    Removing the braces from the user's text would silently edit what the model
+    reads, and DSH has no escape syntax for an interpolated section
+    (dsh-system-prompt README: "No inline escape syntax in interpolated text"),
+    so the honest answer is to stop here, where the message reaches the user
+    through the turn's own error bubble.
+    """
+    reference = _PROMPT_REFERENCE.search(persona or "")
+    if reference is None:
+        return
+    raise ValueError(
+        f"the agent's persona contains the prompt-variable reference "
+        f"{reference.group(0)!r}. DSH delivers a persona as a prompt template "
+        f"and resolves `{{{{name}}}}` references in it, but the loop registers "
+        f"only {', '.join('{{' + name + '}}' for name in _PROMPT_VARIABLES)} — "
+        f"so an unresolved reference aborts prompt assembly before the model is "
+        f"asked anything. Octopus sends the persona as prose, so remove the "
+        f"braces from it (DSH has no escape syntax for a literal group)."
+    )
+
+
 def render_patch(
     *,
     persona: str,
@@ -348,6 +422,7 @@ def render_patch(
     Every row named here has its whole config restated, because that is what a
     patch does — a partial one would silently drop the field it left out.
     """
+    _refuse_prompt_references(persona)
     lines: list[str] = [
         "# Generated by Octopus for one spawn. Regenerate, do not hand-edit:",
         "# a DSH patch replaces the whole config of every row it names.",
@@ -360,8 +435,13 @@ def render_patch(
         lines.append(_block_scalar(persona, 6))
     else:
         lines.append('    personaPrefix: ""')
-    # Kept from the shipped `acp` profile: the model is told where it is.
-    lines.append("    personaSuffix: Your working directory is {{cwd}}.")
+    # No `personaSuffix`, deliberately. It is a second interpolated section, so
+    # it can only add ways to fail prompt assembly, and the one thing it used to
+    # carry — "Your working directory is {{cwd}}." — is both unresolvable on
+    # DSH 0.2.x (the loop registers `provider` and `model`, nothing else) and
+    # redundant: `working-directory` supplies the cwd as literal runtime
+    # context. The schema default for the field is the empty string, which is
+    # exactly what leaving it out means.
 
     lines += ["", "- id: approval", "  config:", f"    policy: {APPROVAL_POLICY}"]
 
@@ -419,19 +499,21 @@ def write_patch(
     One file per spawn signature, and stale ones are swept: the patch is
     regenerated whenever anything baked into it changes, so keeping old copies
     would only accumulate persona text on disk.
+
+    The text is rendered before anything is touched, so a spawn that is refused
+    up front (`_refuse_prompt_references`) leaves the previous patch — and the
+    directory — exactly as it was.
     """
+    text = render_patch(
+        persona=persona, memory_dir=memory_dir, web_research=web_research
+    )
     directory = patch_path(agent_id, signature).parent
     directory.mkdir(parents=True, exist_ok=True)
     for stale in directory.glob("*.yml"):
         if stale.name != f"{signature}.yml":
             stale.unlink(missing_ok=True)
     path = patch_path(agent_id, signature)
-    path.write_text(
-        render_patch(
-            persona=persona, memory_dir=memory_dir, web_research=web_research
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -440,7 +522,28 @@ def write_patch(
 # --------------------------------------------------------------------------- #
 
 
-def render_settings() -> str:
+def _catalog_for(model: str | None) -> tuple[dict[str, object], ...]:
+    """The shipped catalog, plus the agent's own route when it names one.
+
+    A bare model id is selected as `[deepseek-official, id]` over ACP
+    (`dsh_acp.model_option_value`), and the `deepseek-official` provider's
+    catalog is exactly what `llm-deepseek.models` declares — so an agent's
+    custom route has to be declared there or DSH refuses the selection. A
+    `provider/model` pair names a different plugin's provider, whose catalog
+    Octopus cannot speak for; it passes through untouched.
+
+    A custom id is declared text-only: modalities Octopus cannot know must
+    not claim image support, or the ACP bridge would let image content
+    through to a model that cannot take it.
+    """
+    if not model or "/" in model:
+        return _SETTINGS_MODELS
+    if any(entry["id"] == model for entry in _SETTINGS_MODELS):
+        return _SETTINGS_MODELS
+    return (*_SETTINGS_MODELS, {"id": model, "name": model})
+
+
+def render_settings(model: str | None = None) -> str:
     """The `settings.yaml` a managed home gets (see `_SETTINGS_MODELS`).
 
     Hand-rendered rather than dumped through a YAML writer, for the same reason
@@ -451,12 +554,12 @@ def render_settings() -> str:
         "llm-deepseek:",
         "  models:",
     ]
-    for model in _SETTINGS_MODELS:
-        lines.append(f"    - id: {model['id']}")
-        lines.append(f"      name: {model['name']}")
-        if window := model.get("contextWindow"):
+    for model_entry in _catalog_for(model):
+        lines.append(f"    - id: {model_entry['id']}")
+        lines.append(f"      name: {model_entry['name']}")
+        if window := model_entry.get("contextWindow"):
             lines.append(f"      contextWindow: {window}")
-        if modalities := model.get("inputModalities"):
+        if modalities := model_entry.get("inputModalities"):
             lines.append(f"      inputModalities: [{', '.join(modalities)}]")
     lines += [
         "agent-default-model:",
@@ -466,14 +569,14 @@ def render_settings() -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_settings(home: Path) -> Path:
+def write_settings(home: Path, model: str | None = None) -> Path:
     """Write the home's `settings.yaml`, idempotently.
 
     Rewritten only when its content moved, so a running DSH never sees the file
     change under it for no reason.
     """
     path = home / "settings.yaml"
-    text = render_settings()
+    text = render_settings(model)
     if not path.exists() or path.read_text(encoding="utf-8") != text:
         path.write_text(text, encoding="utf-8")
     return path

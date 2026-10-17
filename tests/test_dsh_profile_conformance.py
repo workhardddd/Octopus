@@ -41,16 +41,16 @@ def _isolated_dsh_home(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "dsh_home_dir", str(tmp_path / "dsh"))
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
 
-#: The rows the generated patch names, and the config keys each one must still
-#: have in the shipped composition. A patch restates these fields; if DSH adds
-#: another, this fails and someone decides whether to keep it.
-_RESTATED_ROWS = {
-    "system-prompt": {"personaPrefix", "personaSuffix"},
-    "agent-instructions": {"maxBytes"},
-    "sandbox-policy": {"mode", "workspaceRoot"},
-    "approval": {"policy"},
-    "permission": {"presets"},
-}
+#: The rows the generated patch names. A patch restates each one's whole config,
+#: so what matters is not a field list here — it is that nothing the *shipped*
+#: composition sets on these rows is missing from ours.
+_PATCHED_ROWS = (
+    "system-prompt",
+    "agent-instructions",
+    "sandbox-policy",
+    "approval",
+    "permission",
+)
 
 
 def _dsh(*args: str) -> subprocess.CompletedProcess[str]:
@@ -151,17 +151,32 @@ def _row_is_disabled(dumped: str, row_id: str) -> bool:
     return any(line.strip() == "disabled: true" for line in _row_block(dumped, row_id))
 
 
-def test_the_shipped_composition_still_has_the_fields_the_patch_restates(
-    tmp_path,
-):
-    dumped = _dump()
-    for row_id, expected in _RESTATED_ROWS.items():
-        actual = _row_config_keys(dumped, row_id)
-        assert actual == expected, (
-            f"row {row_id!r} composes {sorted(actual)}, but the generated patch "
-            f"restates {sorted(expected)}. A DSH upgrade changed the row's "
-            f"fields: update server/dsh_home.py's render_patch (a patch replaces "
-            f"the whole config, so anything not restated is dropped)."
+def test_the_shipped_composition_sets_nothing_the_patch_drops(tmp_path):
+    """A patch replaces a row's *whole* config, so a key the shipped `acp`
+    composition sets and ours omits is a value every Octopus turn silently
+    loses.
+
+    Comparing the two dumps is the upgrade-proof form of that check: it needs no
+    hand-kept field list (the one this test used to hold said `system-prompt`
+    carried a `personaSuffix`, and DSH 0.2 stopped composing one), and it
+    names exactly what went missing when a version moves.
+    """
+    patch = dsh_home.write_patch(
+        "agent-conformance",
+        "sig-shipped",
+        persona="You are Octo.",
+        memory_dir=str(tmp_path / "memory"),
+    )
+    shipped = _dump()
+    composed = _dump(str(patch))
+
+    for row_id in _PATCHED_ROWS:
+        dropped = _row_config_keys(shipped, row_id) - _row_config_keys(composed, row_id)
+        assert not dropped, (
+            f"the shipped {row_id!r} row composes {sorted(dropped)}, but the "
+            f"generated patch does not restate them. A patch replaces the whole "
+            f"config, so those values are dropped from every Octopus turn: "
+            f"update server/dsh_home.py's render_patch."
         )
 
 
@@ -177,12 +192,17 @@ def test_a_generated_turn_patch_is_accepted_and_takes_effect(tmp_path):
     )
     dumped = _dump(str(patch))
 
-    # The persona, and the cwd line the shipped profile puts after it.
+    # The persona, and only the persona: no second interpolated section, because
+    # a section is a template and the loop registers `provider` and `model`
+    # alone (a `{{cwd}}` suffix here failed every turn on DSH 0.2.1).
     assert "You are Octo." in dumped
     assert "With a colon: a # hash and 'quotes'." in dumped
-    assert _row_config_value(dumped, "system-prompt", "personaSuffix") == (
-        "Your working directory is {{cwd}}."
+    assert _row_config_value(dumped, "system-prompt", "personaSuffix") in (
+        None,
+        "",
+        '""',
     )
+    assert "{{cwd}}" not in dumped
     # The posture is pinned rather than inferred.
     assert _row_config_value(dumped, "sandbox-policy", "mode") == "danger-full-access"
     assert _row_config_value(dumped, "approval", "policy") == "never"

@@ -21,6 +21,7 @@ import os
 from typing import Any
 
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
+from .fork import CLI_FILE
 from .harness import Harness
 from .login import LoginMethod
 from .profile import (
@@ -561,7 +562,7 @@ def _codex_sessions_dir(credential: Any) -> "Path":
 def _rollout_meta_id(p: "Path") -> "str | None":
     """The `session_meta.payload.id` of a rollout (its first line), or None."""
     try:
-        with p.open() as f:
+        with p.open(**CLI_FILE) as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -621,7 +622,7 @@ async def _fork_copy(
     # rollout that later looks resumable (Vera review).
     tmp = dest.with_suffix(".jsonl.tmp")
     try:
-        with src.open() as fin, tmp.open("w") as fout:
+        with src.open(**CLI_FILE) as fin, tmp.open("w", **CLI_FILE) as fout:
             for line in fin:
                 line = line.strip()
                 if not line:

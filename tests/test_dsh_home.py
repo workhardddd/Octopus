@@ -70,6 +70,33 @@ def test_settings_land_in_both_kinds_of_home_and_are_stable():
         assert settings_file.stat().st_mtime_ns == first
 
 
+def test_settings_declare_a_custom_model_route_the_agent_names():
+    """An agent's bare model id has to land in the catalog: the plugin's model
+    list REPLACES its built-in one, so an undeclared route is refused at ACP
+    selection no matter how valid the id looks."""
+    home = dsh_home.ensure_agent_home(AGENT, model="my-relay-model")
+    text = (home / "settings.yaml").read_text(encoding="utf-8")
+    assert "id: my-relay-model" in text
+    # Text-only: modalities Octopus cannot know must not claim image support,
+    # or the ACP bridge would pass image content to a model that can't take it.
+    entry = text.split("- id: my-relay-model", 1)[1].split("- id:", 1)[0]
+    assert "inputModalities" not in entry
+    # The shipped routes stay restated alongside it — the list replaces.
+    assert "id: deepseek-flash" in text
+
+
+def test_settings_ignore_provider_scoped_routes_and_known_ids():
+    """A `provider/model` pair names another plugin's provider, whose catalog
+    Octopus cannot speak for — it passes through undeclared. A shipped id
+    renders byte-identically to the base catalog, so no home churns for it."""
+    home = dsh_home.ensure_agent_home(AGENT, model="other-provider/x")
+    text = (home / "settings.yaml").read_text(encoding="utf-8")
+    assert "other-provider" not in text
+    base = dsh_home.render_settings()
+    assert dsh_home.render_settings("deepseek-v4-pro") == base
+    assert dsh_home.render_settings("other-provider/x") == base
+
+
 # --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
@@ -127,17 +154,25 @@ def test_remove_agent_home_takes_the_sessions_with_it():
 def test_purge_session_store_removes_only_that_session():
     """DSH has no deletion API, so Octopus's hard session delete is the only
     thing keeping its store from growing forever. The cwd component of the
-    path is a lossy encoding we are not given, so the id is what we match."""
+    path is a lossy encoding we are not given, so the id is what we match — and
+    the projection cache, a second per-session file inside the home, goes with
+    it (left behind it would outlive the deletion it belongs to)."""
     home = dsh_home.ensure_agent_home(AGENT)
     doomed = home / "sessions" / "--some-project--" / "sess-doomed"
     kept = home / "sessions" / "--other-project--" / "sess-kept"
     doomed.mkdir(parents=True)
     kept.mkdir(parents=True)
+    cache = home / "storages" / "session_projcache" / "sessions"
+    cache.mkdir(parents=True)
+    (cache / "sess-doomed.json").write_text("{}", encoding="utf-8")
+    (cache / "sess-kept.json").write_text("{}", encoding="utf-8")
 
     dsh_home.purge_session_store(AGENT, "sess-doomed")
 
     assert not doomed.exists()
     assert kept.exists()
+    assert not (cache / "sess-doomed.json").exists()
+    assert (cache / "sess-kept.json").exists()
 
 
 def test_purge_session_store_is_inert_without_an_id_or_a_store():
@@ -152,9 +187,9 @@ def test_purge_session_store_is_inert_without_an_id_or_a_store():
 
 def test_patch_pins_persona_posture_and_memory_together():
     """A DSH patch replaces the whole config of every row it names, so each row
-    here restates what it means to keep — the persona template keeps its cwd
-    suffix, and the posture is pinned rather than inferred from the composed
-    defaults."""
+    here restates what it means to keep — and the persona row carries the
+    persona and nothing else: a second interpolated section is only another way
+    to fail prompt assembly (see `test_a_persona_that_looks_like_a_template_...`)."""
     yaml_text = dsh_home.render_patch(
         persona="You are Octo.\nLine two.", memory_dir="/mem", web_research=False
     )
@@ -162,7 +197,8 @@ def test_patch_pins_persona_posture_and_memory_together():
     assert "- id: system-prompt" in yaml_text
     assert "personaPrefix: |-" in yaml_text
     assert "      You are Octo.\n      Line two." in yaml_text
-    assert "personaSuffix: Your working directory is {{cwd}}." in yaml_text
+    assert "personaSuffix" not in yaml_text
+    assert "{{" not in yaml_text, "the patch must resolve no prompt variable"
 
     assert "policy: never" in yaml_text
     assert "mode: danger-full-access" in yaml_text
@@ -176,6 +212,36 @@ def test_patch_pins_persona_posture_and_memory_together():
     assert f"maxBytes: {dsh_home.INSTRUCTION_MAX_BYTES}" in yaml_text
     # A normal turn keeps every tool: only a research leaf scopes them.
     assert "disabled: true" not in yaml_text
+
+
+def test_a_persona_that_looks_like_a_template_is_refused_by_name():
+    """DSH registers `provider` and `model` as prompt variables and nothing
+    else, and interpolates a persona section as a template. A reference it
+    cannot resolve throws during `renderPrompt` — before the model is asked
+    anything — which the ACP client can only report as a bare "Internal
+    error". So the spawn says which reference is at fault.
+
+    Real case this comes from: Octopus itself generated a persona suffix
+    reading "Your working directory is {{cwd}}.", which was correct on DSH
+    0.1.x and killed every turn on 0.2.1, where the loop stopped registering
+    `cwd`.
+    """
+    with pytest.raises(ValueError, match=r"\{\{cwd\}\}"):
+        dsh_home.render_patch(persona="You work in {{cwd}}.", memory_dir=None)
+
+    # A lone `{{` is literal to DSH (no complete group), so it is not refused.
+    assert "{{" in dsh_home.render_patch(persona="Use {{ braces.", memory_dir=None)
+
+
+def test_a_refused_persona_writes_nothing(tmp_path):
+    """The refusal is decided before the filesystem is touched, so a rejected
+    spawn cannot leave a half-written home behind."""
+    with pytest.raises(ValueError):
+        dsh_home.write_patch(
+            AGENT, "sig-refused", persona="hi {{model}}", memory_dir=None
+        )
+    assert not dsh_home.patch_path(AGENT, "sig-refused").exists()
+    assert not dsh_home.patch_path(AGENT, "sig-refused").parent.exists()
 
 
 def test_patch_scopes_a_research_leaf_to_the_web():

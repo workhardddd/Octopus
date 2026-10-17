@@ -27,6 +27,24 @@ import subprocess
 from server.proc import kill_group, spawn_kwargs
 
 
+#: `subprocess.run` keywords for reading a CLI's output: **UTF-8, never the
+#: locale**.
+#:
+#: `text=True` alone decodes with the locale — GBK on a Chinese Windows — so a
+#: model reply or a CLI notice containing a byte GBK does not have raises
+#: `UnicodeDecodeError` inside `subprocess`'s reader thread. That kills the
+#: capture, leaves `proc.stdout` as `None`, and surfaces two frames later as
+#: `json.loads(None)` → "the JSON object must be str, bytes or bytearray, not
+#: NoneType", which reads like a test-logic bug rather than an unlucky
+#: character. The CLIs speak UTF-8; an undecodable byte becomes U+FFFD instead
+#: of a dead run.
+CLI_OUTPUT: dict[str, object] = {
+    "capture_output": True,
+    "encoding": "utf-8",
+    "errors": "replace",
+}
+
+
 def _resolve_cli(binary: str) -> str | None:
     """Resolve a CLI honoring the same PATH fallback the harness uses (nvm /
     ~/.local/bin), so the gate matches how the backend actually launches it."""

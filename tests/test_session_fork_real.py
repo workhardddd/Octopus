@@ -34,7 +34,7 @@ for _d in [
     if _d and _d not in os.environ.get("PATH", "").split(os.pathsep):
         os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
 
-from tests.cli_gate import claude_cli_works, codex_cli_works
+from tests.cli_gate import CLI_OUTPUT, claude_cli_works, codex_cli_works
 
 # Gate on the CLI being installed AND signed in — a logged-out binary would
 # otherwise fail these with a confusing 401 instead of skipping.
@@ -225,7 +225,7 @@ async def test_codex_fork_history_replay_then_native_resume(tmp_path, monkeypatc
 
 
 def _git(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *args], cwd=cwd, check=True, **CLI_OUTPUT)
 
 
 @pytest.mark.skipif(not HAS_CLAUDE, reason="claude CLI not on PATH")
@@ -264,7 +264,7 @@ async def test_claude_fork_safe_revert_real_repo(tmp_path, monkeypatch):
         assert rec["status"] == "completed", rec
         assert not (repo / "notes.txt").exists(), "revert didn't restore the tree"
         stash = subprocess.run(["git", "stash", "list"], cwd=repo,
-                               capture_output=True, text=True).stdout
+                               **CLI_OUTPUT).stdout
         assert f"octopus: pre-fork stash {fork.id}" in stash
     finally:
         # Release any CLI process a finished turn is holding, or each test

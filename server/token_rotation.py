@@ -117,8 +117,8 @@ def env_files_defining_token() -> list[Path]:
         if resolved in found:
             continue
         try:
-            text = resolved.read_text()
-        except OSError:
+            text = resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
         if re.search(rf"^{ENV_KEY}=", text, re.M):
             found.append(resolved)
@@ -127,14 +127,19 @@ def env_files_defining_token() -> list[Path]:
 
 def _rewrite_env_file(path: Path, token: str) -> None:
     """Replace the token line in `path`, atomically, leaving everything else
-    exactly as it was."""
-    original = path.read_text()
+    exactly as it was.
+
+    Read and written as UTF-8 explicitly: the text default is the locale, so on
+    a Chinese Windows a `.env` that carries any non-ASCII comment would either
+    fail to load here or be re-encoded as GBK on the way back out.
+    """
+    original = path.read_text(encoding="utf-8")
     updated = re.sub(
         rf"^{ENV_KEY}=.*$", f"{ENV_KEY}={token}", original, flags=re.M
     )
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env-rotate-")
     try:
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(updated)
         os.chmod(tmp_name, 0o600)
         os.replace(tmp_name, path)
@@ -176,7 +181,7 @@ async def rotate_auth_token(
     previous: dict[Path, str] = {}
     try:
         for path in paths:
-            previous[path] = path.read_text()
+            previous[path] = path.read_text(encoding="utf-8")
             _rewrite_env_file(path, token)
     except OSError as exc:
         _restore(previous)
@@ -214,7 +219,7 @@ async def rotate_auth_token(
 def _restore(previous: dict[Path, str]) -> None:
     for path, text in previous.items():
         try:
-            path.write_text(text)
+            path.write_text(text, encoding="utf-8")
         except OSError:
             logger.exception("could not restore %s after a failed rotation", path)
 

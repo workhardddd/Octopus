@@ -12,10 +12,10 @@ differed from the sketch above, and what is verified:
   *factory*, like `new_event_parser`), and `EventParser` grew `flush()` so a
   parser that coalesces ACP's `messageId` chunks can emit the message before the
   turn's terminal event.
-- **Verified against the real CLI** (dsh 0.1.5-rc.2, this machine):
-  `tests/test_dsh_profile_conformance.py` 4/4 — including the guard that the
-  shipped rows still carry exactly the fields the patch restates — and
-  `tests/test_backend_dsh_real.py` 7/7 (a real turn, a second turn on the held
+- **Verified against the real CLI** (dsh 0.1.5-rc.2 when written, re-verified on
+  0.2.1-rc.2): `tests/test_dsh_profile_conformance.py` 4/4 — including the guard
+  that the shipped rows set nothing the patch drops — and
+  `tests/test_backend_dsh_real.py` (a real turn, a second turn on the held
   process, a resume across a fresh process, a `headless` one-shot, a rejected
   key classified as an auth error, a **research web leaf**, and a **dangling
   resume id**). `web/e2e/dsh.spec.ts` adds a mocked dialog test and a real turn
@@ -80,7 +80,9 @@ so a missing feature is a declared degradation rather than a silent fallback.
 
 ### 0.1 The facts this design is built on
 
-Everything below was verified against the installed `dsh` 0.1.5-rc.2
+Everything below was verified against the installed `dsh` (0.1.5-rc.2 when this
+plan was written; re-verified on **0.2.1-rc.2**, which is where §3.9's
+`{{cwd}}`/`ralph` breaks were found)
 (`@deepseek-ai/dsh` + 239 bundled `@deepseek-ai/*` packages, READMEs, shipped
 `lib/*.js`, `lib/types/*.d.ts`, and the live `$DSH_HOME`). The plan records the
 load-bearing ones because they are *not* obvious from the outside:
@@ -375,7 +377,6 @@ dir, `web_research`), and stale patch files are purged on spawn:
   config:
     personaPrefix: |-
       <persona + Octopus in-app-tools blurb + connectors blurb>
-    personaSuffix: Your working directory is {{cwd}}.
 - id: agent-instructions
   config:
     dshHome: <agent memory dir>      # native read path for agent memory
@@ -387,6 +388,18 @@ dir, `web_research`), and stale patch files are purged on spawn:
   config:
     mode: danger-full-access         # posture (A) — see the ADR
 ```
+
+**The persona row carries the persona and nothing else**, because a prompt
+section is an interpolated *template* and the loop registers exactly two
+variables (`provider`, `model`). A reference it cannot resolve throws inside
+`renderPrompt` — before the model is asked anything — and surfaces only as
+`Internal error: turn failed: …`. So the patch emits no `personaSuffix` (the
+cwd it used to announce arrives as literal runtime context from the
+`working-directory` service), and a persona that *contains* a `{{…}}` group is
+refused at spawn, naming the reference, instead of bricking the turn
+(`dsh_home._refuse_prompt_references`). Both rules came from a real failure:
+DSH 0.2.1 stopped registering the `cwd` variable and every Octopus DSH turn
+died at prompt assembly — see §3.9.
 
 *Verification item*: whether the session's initial sandbox mode is taken from
 `sandbox-policy.mode` or from `permission.defaultPreset`. If the latter wins,
@@ -491,6 +504,19 @@ names and row shapes are what this test protects; **that a turn actually starts
 and answers is only provable by running one**, which is why
 `test_backend_dsh_real.py` runs the leaf and the dangling-resume recovery for
 real rather than asserting their argv.
+
+**And it does not run prompt assembly**, which is a third layer. A row can
+compose, load, and still fail when the engine renders the system prompt: that is
+what DSH 0.2.1-rc.2 did to the `{{cwd}}` in our `personaSuffix` (the field is
+still valid; the *variable* stopped being registered), and every Octopus DSH
+turn answered `Internal error: turn failed: unknown prompt variable "{{cwd}}"`.
+Two things now cover it. The patch emits no variable references at all, and a
+persona that contains one is refused by name at spawn (§3.5). And the real
+rejected-key turn in `test_backend_dsh_real.py` exercises the whole path —
+patch, assembly, model request — on any box with the binary, needing no API key
+precisely because assembly happens *before* authentication: a prompt that will
+not assemble fails differently from a key that is refused, and that test asserts
+the second.
 
 ## 4. Files
 
@@ -607,8 +633,14 @@ and the real-CLI Claude/Codex suites.
 
 ## 7. Risks
 
-1. **DSH has no compatibility promise (0.1.5-rc.2).** *Mitigation*: the §3.9
-   `--dump-config` conformance test; all DSH coupling lives in three files.
+1. **DSH has no compatibility promise (0.1.5-rc.2 → 0.2.1-rc.2).**
+   *Mitigation*: the §3.9 `--dump-config` conformance test; all DSH coupling
+   lives in three files. **It has already been breached once**: 0.2.1 dropped
+   the `cwd` prompt variable (killing every turn, §3.9) and the `ralph` tool row
+   (silently leaving the leaf patch naming a row that no longer exists). The
+   conformance test and the real rejected-key turn each caught their half; both
+   classes now have a test and a construction rule ("the patch resolves no
+   variable", "the leaf list contains only rows the dump shows").
 2. **Cold-home profile initialization is slow and needs the network.**
    *Mitigation*: explicit provisioning at agent create/boot, one shared
    pre-warmed profile workspace, its own error path, and a symlink fallback
