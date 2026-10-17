@@ -33,6 +33,7 @@ from server.harness import (
     register,
 )
 from server.harness import assembly
+from server.harness.events import HarnessCredential
 from server.harness.registry import _REGISTRY
 
 FAKE_CLI = Path(__file__).parent / "_fixtures" / "fake_cli.py"
@@ -463,6 +464,31 @@ def test_is_transient_error_retries_server_side_throttle():
 # (MCP servers / subagents) are reaped as a unit, not orphaned.
 
 
+def test_prepare_spawn_expands_a_cmd_shim_to_its_target(tmp_path, monkeypatch):
+    """A bare CLI name resolves to a `.cmd` shim on Windows, and a shim cannot
+    carry a long argv: CreateProcess routes it through `%COMSPEC% /c`, where
+    cmd.exe caps the command line at 8191 chars — a spawn with an inline
+    --mcp-config plus a persona blows past it and cmd answers "命令行太长"
+    before the CLI starts (found for real: an agent whose whole persona sat in
+    --append-system-prompt died 45 ms into its first turn). prepare_spawn must
+    hand CreateProcess the program the shim picks, not the shim itself."""
+    if os.name != "nt":
+        pytest.skip("npm .cmd shims are a Windows launch path")
+    from server.harness.run import prepare_spawn
+
+    exe = tmp_path / "pkg" / "bin" / "tool.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    shim = tmp_path / "tool.cmd"
+    shim.write_text(f'"{exe}"   %*' + chr(13) + chr(10), encoding="utf-8")
+    monkeypatch.setattr(
+        "server.harness.run._which_with_fallback", lambda name: str(shim)
+    )
+    argv, _ = prepare_spawn(["tool", "--print", "x" * 9000], {})
+    assert argv[0] == str(exe)
+    assert len(argv[2]) == 9000
+
+
 def test_prepare_spawn_isolates_the_process_group():
     """Which kwarg isolates a child's process group is the platform's business
     (`server/proc.py`); that a turn is isolated at all is not (turn-safety.md
@@ -651,6 +677,19 @@ def test_spawn_signature_changes_with_anything_baked_in_at_spawn():
     # …and so must the working dir.
     same_cfg = Harness(profile).create_run(RunConfig(**base))
     assert same_cfg.spawn_signature("/elsewhere", None) != ref
+
+
+def test_spawn_signature_changes_with_the_credential_endpoint():
+    """A credential whose base_url moved renders a different child env — a held
+    process may not keep serving the old relay."""
+    profile = _sig_profile()
+    run = Harness(profile).create_run(RunConfig(system_prompt="P"))
+    plain = HarnessCredential(backend="claude-code", auth_type="api_key", secret="s")
+    relay = HarnessCredential(
+        backend="claude-code", auth_type="api_key", secret="s",
+        base_url="https://relay.example",
+    )
+    assert run.spawn_signature("/tmp", plain) != run.spawn_signature("/tmp", relay)
 
 
 # --------------------------------------------------------------------------- #

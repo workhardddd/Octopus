@@ -104,3 +104,84 @@ def test_a_group_is_only_signalled_when_the_process_leads_it(monkeypatch):
     assert kill_group(proc) is False
     assert signalled == [], "killpg was handed a group this process does not lead"
     assert proc.killed is True, "the direct child is still stopped"
+
+
+# --- output decoding (CLI output is not always UTF-8) -----------------------
+
+
+def test_decode_output_reads_utf8_first():
+    assert proc_mod.decode_output("héllo\n".encode("utf-8")) == "héllo\n"
+
+
+def test_decode_output_falls_back_to_the_ansi_code_page():
+    """GBK bytes for 命令行太长 — cmd.exe's "command line too long", the real
+    stderr a Chinese-locale Windows produces — must arrive as words, not the
+    U+FFFD slush errors="replace" alone produces."""
+    raw = "命令行太长。".encode("gbk")
+    assert proc_mod.decode_output(raw).rstrip("\r\n") == "命令行太长。"
+    # not just Chinese: any non-UTF-8 bytes decode as *something* readable-ish
+    # rather than a wall of replacement characters.
+    assert "���" not in proc_mod.decode_output(b"\x81\x40\x81\x41")
+
+
+# --- npm shim resolution (Windows cmd.exe 8191-char command line) -----------
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="npm .cmd shims are a Windows launch path")
+class TestResolveWindowsShim:
+    def test_a_native_exe_shim_resolves_to_the_exe(self, tmp_path):
+        exe = tmp_path / "pkg" / "bin" / "tool.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"MZ")
+        shim = tmp_path / "tool.cmd"
+        shim.write_text(
+            "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n"
+            ":start\r\nSETLOCAL\r\nCALL :find_dp0\r\n"
+            f'"{exe}"   %*\r\n',
+            encoding="utf-8",
+        )
+        assert proc_mod.resolve_windows_shim(str(shim)) == [str(exe)]
+
+    def test_a_node_script_shim_resolves_to_node_plus_script(self, tmp_path, monkeypatch):
+        script = tmp_path / "node_modules" / "pkg" / "cli.js"
+        script.parent.mkdir(parents=True)
+        script.write_text("// entry", encoding="utf-8")
+        node = tmp_path / "node.exe"
+        node.write_bytes(b"MZ")
+        shim = tmp_path / "tool.cmd"
+        shim.write_text(
+            "@ECHO off\r\n:start\r\n"
+            'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n'
+            ') ELSE (\r\n  SET "_prog=node"\r\n)\r\n'
+            f'endLocal & "%_prog%"  "{script}" %*\r\n',
+            encoding="utf-8",
+        )
+        assert proc_mod.resolve_windows_shim(str(shim)) == [str(node), str(script)]
+
+    def test_a_node_script_without_a_local_node_uses_which(self, tmp_path, monkeypatch):
+        script = tmp_path / "cli.js"
+        script.write_text("// entry", encoding="utf-8")
+        shim = tmp_path / "tool.cmd"
+        shim.write_text(f'endLocal & "%_prog%"  "{script}" %*\r\n', encoding="utf-8")
+        found = tmp_path / "elsewhere" / "node.exe"
+        monkeypatch.setattr(
+            proc_mod.shutil, "which", lambda name: str(found) if name == "node" else None
+        )
+        assert proc_mod.resolve_windows_shim(str(shim)) == [str(found), str(script)]
+
+    def test_an_unresolvable_shim_is_left_alone(self, tmp_path):
+        shim = tmp_path / "tool.cmd"
+        shim.write_text("@ECHO off\r\nweird-but-not-npm %*\r\n", encoding="utf-8")
+        assert proc_mod.resolve_windows_shim(str(shim)) == [str(shim)]
+
+    def test_a_missing_target_falls_back_to_the_shim(self, tmp_path):
+        shim = tmp_path / "tool.cmd"
+        shim.write_text(
+            f'"{tmp_path / "gone.exe"}"   %*\r\n', encoding="utf-8"
+        )
+        assert proc_mod.resolve_windows_shim(str(shim)) == [str(shim)]
+
+    def test_non_shims_pass_through_untouched(self, tmp_path):
+        exe = tmp_path / "tool.exe"
+        exe.write_bytes(b"MZ")
+        assert proc_mod.resolve_windows_shim(str(exe)) == [str(exe)]

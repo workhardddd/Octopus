@@ -191,7 +191,8 @@ CREATE TABLE IF NOT EXISTS backend_credentials (
     status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
     token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys
     needs_reconnect INTEGER NOT NULL DEFAULT 0,
-    last_refresh_error_code TEXT           -- see oauth_errors.RefreshErrorCode
+    last_refresh_error_code TEXT,          -- see oauth_errors.RefreshErrorCode
+    base_url TEXT                           -- relay/self-hosted endpoint; null = the CLI's own default
 );
 
 CREATE INDEX IF NOT EXISTS idx_credentials_backend
@@ -452,6 +453,7 @@ class Database:
             "needs_reconnect INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE backend_credentials ADD COLUMN "
             "last_refresh_error_code TEXT",
+            "ALTER TABLE backend_credentials ADD COLUMN base_url TEXT",
         ):
             try:
                 await self._conn.execute(ddl)
@@ -1371,6 +1373,7 @@ class Database:
         "c.token_expires_at",
         "c.needs_reconnect",
         "c.last_refresh_error_code",
+        "c.base_url",
     )
 
     def _row_to_credential(self, row: tuple[Any, ...]) -> dict[str, Any]:
@@ -1385,6 +1388,7 @@ class Database:
             "token_expires_at": row[7],
             "needs_reconnect": bool(row[8]),
             "last_refresh_error_code": row[9],
+            "base_url": row[10],
         }
 
     async def save_credential(
@@ -1395,14 +1399,23 @@ class Database:
         auth_type: str,
         secret_encrypted: str,
         created_at: str,
+        base_url: str | None = None,
     ) -> None:
         await self._ensure_connected()
         await self._conn.execute(
             "INSERT INTO backend_credentials "
             "(id, backend, label, auth_type, secret_encrypted, created_at, "
-            " status, needs_reconnect) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'active', 0)",
-            (credential_id, backend, label, auth_type, secret_encrypted, created_at),
+            " status, needs_reconnect, base_url) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', 0, ?)",
+            (
+                credential_id,
+                backend,
+                label,
+                auth_type,
+                secret_encrypted,
+                created_at,
+                base_url,
+            ),
         )
         await self._conn.execute(
             "INSERT OR REPLACE INTO credential_secrets "
@@ -1444,11 +1457,12 @@ class Database:
             "token_expires_at",
             "needs_reconnect",
             "last_refresh_error_code",
+            "base_url",
         }
         # Nullable columns need to be writable to NULL (e.g. clearing a
         # stale `last_refresh_error_code` after a successful refresh).
         # Callers that want to leave a column alone should just not pass it.
-        nullable_meta = {"token_expires_at", "last_refresh_error_code"}
+        nullable_meta = {"token_expires_at", "last_refresh_error_code", "base_url"}
         meta_updates = {
             k: v
             for k, v in fields.items()

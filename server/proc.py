@@ -40,11 +40,14 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import locale
 import os
+import re
 import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 IS_WINDOWS = os.name == "nt"
@@ -165,6 +168,117 @@ def shell_env_path(shell: PosixShell, path: str | None) -> str:
     if path:
         parts.append(path)
     return os.pathsep.join(parts)
+
+
+def decode_output(raw: bytes) -> str:
+    """Decode a line of child-process output, UTF-8 first.
+
+    Modern CLIs emit UTF-8, but a Chinese-locale Windows still speaks GBK
+    wherever a program prints through the console — cmd.exe's own errors
+    ("命令行太长"), installers, older tools. Decoding those bytes as UTF-8
+    with ``errors="replace"`` turns every message into U+FFFD slush, which
+    is how a perfectly diagnosable failure ("the command line is too long")
+    reached the user as unreadable garbage inside a turn report.
+
+    UTF-8 is tried strictly first: GBK bytes almost never form valid UTF-8,
+    so the fallback fires only for genuinely non-UTF-8 output — the ANSI
+    code page, which is what the console-speaking programs actually wrote.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+_SHIM_QUOTED_RE = re.compile(r'"([^"]*)"')
+_SHIM_SET_RE = re.compile(r'\s*SET\s+"?(\w+)"?=(.*)', re.IGNORECASE)
+_SHIM_SUFFIXES = (".cmd", ".bat")
+_SHIM_SCRIPT_SUFFIXES = (".js", ".cjs", ".mjs")
+
+
+def resolve_windows_shim(path: str) -> list[str]:
+    """Expand an npm-style ``.cmd``/``.bat`` shim into the argv it runs.
+
+    Windows cannot CreateProcess a ``.cmd`` directly: it silently routes the
+    spawn through ``%COMSPEC% /c``, and cmd.exe caps the *whole command line*
+    at 8191 characters. A harness spawn carries a large inline
+    ``--mcp-config`` JSON and the agent's whole persona in
+    ``--append-system-prompt`` — far past that cap — so cmd.exe refuses with
+    ``命令行太长`` and the CLI never starts at all, while the identical argv
+    works on POSIX. The npm shim exists only to pick the real program: a
+    native ``.exe`` (claude), or ``node`` plus a ``.js`` entry (codex, dsh).
+    Resolving it here hands the argv to CreateProcess directly, whose
+    32767-character ceiling leaves real headroom.
+
+    Returns ``[path]`` unchanged for anything that is not a parsable shim of
+    the two npm shapes — an unrecognised shim still *runs* via cmd.exe today,
+    and leaving it alone beats breaking a launch that would have worked.
+    """
+    if os.path.splitext(path)[1].lower() not in _SHIM_SUFFIXES:
+        return [path]
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [path]
+    # npm shims put the program they exec on the one line that ends in `%*`:
+    # `"<dir>\...\tool.exe"   %*` (a native binary), or, for node scripts,
+    # `... "%_prog%"  "%dp0%\...\cli.js" %*`.
+    launch_lines = [line for line in text.splitlines() if "%*" in line]
+    if not launch_lines:
+        return [path]
+    quoted = _SHIM_QUOTED_RE.findall(launch_lines[-1])
+    if not quoted:
+        return [path]
+    # `SET` lines define what the launch line's variables mean. npm's node
+    # shims assign `_prog` on *both* branches of an `IF EXIST node.exe` —
+    # a path next to the shim, or bare `node` — so each variable keeps every
+    # assignment in file order and resolution picks the first that names an
+    # existing file, which is exactly the branch cmd.exe would have taken.
+    variables: dict[str, list[str]] = {}
+    shim_dir = os.path.dirname(os.path.abspath(path))
+    for line in text.splitlines():
+        match = _SHIM_SET_RE.match(line)
+        if match:
+            # npm quotes the whole assignment — `SET "_prog=..."` — so the
+            # captured value carries a trailing quote of its own.
+            value = match.group(2).strip()
+            variables.setdefault(match.group(1).lower(), []).append(
+                value[:-1] if value.endswith('"') else value
+            )
+
+    def expand(token: str) -> str:
+        # %dp0% is the shim's own directory (`%~dp0`), which the tokens join
+        # with an explicit separator; the rest come from the SET lines.
+        token = re.sub(r"%dp0%", lambda _m: shim_dir, token, flags=re.IGNORECASE)
+
+        def _sub(match: re.Match[str]) -> str:
+            candidates = variables.get(match.group(1).lower(), [])
+            for candidate in candidates:
+                expanded = re.sub(
+                    r"%dp0%", lambda _m: shim_dir, candidate, flags=re.IGNORECASE
+                )
+                if os.path.isfile(expanded):
+                    return expanded
+            return candidates[-1] if candidates else match.group(0)
+
+        return re.sub(r"%(\w+)%", _sub, token)
+
+    expanded = [expand(token) for token in quoted]
+    target = expanded[-1]
+    if os.path.isfile(target) and target.lower().endswith(".exe"):
+        return [target]
+    script = expanded[-1]
+    if (
+        len(expanded) >= 2
+        and os.path.isfile(script)
+        and script.lower().endswith(_SHIM_SCRIPT_SUFFIXES)
+    ):
+        node = expanded[-2]
+        if not os.path.isfile(node):
+            node = shutil.which("node") or ""
+        if node:
+            return [node, script]
+    return [path]
 
 
 def _git_install_root(shell: str) -> str | None:

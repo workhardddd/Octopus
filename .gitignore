@@ -7,11 +7,14 @@ web/dist/
 web/test-results/
 test-results/
 .claude/
+.dsh/
 .pytest_cache/
 octopus.db*
 octopus-dev.db*
 *.egg-info/
-
+*.log
+.dsh-kanban.json
+.session-time-report.txt
 # Intermediate file from `bun run generate:contracts`
 web/.openapi.json
 

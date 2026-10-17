@@ -83,6 +83,18 @@ def test_dsh_turn_exports_its_home_and_injects_the_credential():
     assert kwargs["env"]["DEEPSEEK_API_KEY"] == "sk-test"
 
 
+def test_dsh_relay_credential_redirects_the_endpoint():
+    """A base_url rides the same trusted launch environment as the key. The
+    managed home's settings.yaml never pins a baseURL, so this is the one knob
+    that redirects the endpoint."""
+    credential = HarnessCredential(
+        backend="dsh", auth_type="api_key", secret="sk-test",
+        base_url="https://relay.example",
+    )
+    _, kwargs = build_turn_argv(_ctx(credential=credential))
+    assert kwargs["env"]["DEEPSEEK_BASE_URL"] == "https://relay.example"
+
+
 def test_dsh_turn_refuses_to_run_without_a_home_or_a_patch():
     """A turn without a home would write into the user's own `~/.dsh`; a turn
     without the generated patch would carry no persona and — worse — no

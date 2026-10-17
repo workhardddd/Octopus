@@ -101,6 +101,9 @@ test("the DSH dialog saves a pasted API key", async ({ page }) => {
     label: "DSH E2E key",
     auth_type: "api_key",
     secret: "sk-e2e-not-a-real-key",
+    // The paste form always carries the optional relay endpoint; left
+    // empty it is null = the CLI's own default endpoint.
+    base_url: null,
   });
   const item = page.locator(".credential-item", { hasText: "DSH E2E key" });
   await expect(item).toBeVisible();

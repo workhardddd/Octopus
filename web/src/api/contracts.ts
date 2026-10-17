@@ -1454,10 +1454,14 @@ export interface paths {
         };
         /**
          * List Backends
-         * @description Which AI backends are usable on this host (codex-backend.md §6.1).
-         *     A harness kind appears only when its CLI resolves on PATH — except the
-         *     default kind, which is always listed even before it is installed (the
-         *     historical contract, and what lets a fresh install pick an engine).
+         * @description Which AI backends are usable on this host (codex-backend.md §6.1), with
+         *     the default kind FIRST.
+         *
+         *     A kind appears only when its CLI resolves on PATH — except the default kind,
+         *     which is always listed even before it is installed (the historical
+         *     contract, and what lets a fresh install pick an engine). Order matters:
+         *     clients read the first entry as the default, so the default is also what a
+         *     picker pre-selects.
          */
         get: operations["list_backends_api_backends_get"];
         put?: never;
@@ -2064,6 +2068,8 @@ export interface components {
             auth_type: components["schemas"]["AuthType"];
             /** Secret */
             secret: string;
+            /** Base Url */
+            base_url?: string | null;
         };
         /** CreateNotifierRequest */
         CreateNotifierRequest: {
@@ -2144,6 +2150,8 @@ export interface components {
             needs_reconnect: boolean;
             /** Last Refresh Error Code */
             last_refresh_error_code?: string | null;
+            /** Base Url */
+            base_url?: string | null;
         };
         /**
          * CredentialStatus
@@ -2776,6 +2784,8 @@ export interface components {
             label?: string | null;
             /** Secret */
             secret?: string | null;
+            /** Base Url */
+            base_url?: string | null;
         };
         /** UpdateNotifierRequest */
         UpdateNotifierRequest: {

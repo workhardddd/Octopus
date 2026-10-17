@@ -24,12 +24,18 @@ class HarnessCredential:
 
     ``secret`` is plaintext at this point — decrypted upstream by the
     credential resolver. The profile is responsible for never logging it.
+
+    ``base_url`` is an optional relay/self-hosted endpoint the profile may
+    render alongside the secret (ANTHROPIC_BASE_URL, DEEPSEEK_BASE_URL).
+    A profile that has no such surface (Codex) ignores it; the credentials
+    router already refuses storing one there.
     """
 
     backend: str            # "claude-code" | "codex"
     auth_type: str          # "api_key" | "oauth"
     secret: str = ""        # plaintext key/token (env_secret style)
     home_dir: str | None = None   # CODEX_HOME dir (home_dir style)
+    base_url: str | None = None   # relay/self-hosted endpoint (env_secret style)
 
 
 @dataclass

@@ -51,6 +51,49 @@ def test_turn_argv_web_research_denies_destructive_tools(tmp_path):
     assert "WebSearch" not in denied and "WebFetch" not in denied  # web stays
 
 
+def test_relay_credential_owns_the_whole_connection(tmp_path, monkeypatch):
+    """A credential with a base_url is a relay endpoint: the secret goes out as
+    `Authorization: Bearer` (ANTHROPIC_AUTH_TOKEN — what a relay expects, not
+    the x-api-key header ANTHROPIC_API_KEY produces), the endpoint as
+    ANTHROPIC_BASE_URL, and every auth var inherited from the server's own
+    environment is scrubbed so the two can never mix."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "host-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "host-token")
+    ctx = _assemble_ctx(
+        prompt="p", wd=str(tmp_path), resume=None,
+        credential=HarnessCredential(
+            backend="claude-code", auth_type="api_key", secret="relay-key",
+            base_url="https://relay.example",
+        ),
+    )
+    env = build_turn_argv(ctx)[1]["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://relay.example"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "relay-key"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_plain_key_credential_leaves_the_inherited_environment_alone(
+    tmp_path, monkeypatch
+):
+    """Without a base_url the credential only sets its own var; the host's
+    relay setup (if any) keeps flowing exactly as before. This box actually
+    carries a global ANTHROPIC_BASE_URL, so the test starts from a scrubbed
+    environment to stay hermetic."""
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "host-token")
+    ctx = _assemble_ctx(
+        prompt="p", wd=str(tmp_path), resume=None,
+        credential=HarnessCredential(
+            backend="claude-code", auth_type="api_key", secret="sk-ant-1"
+        ),
+    )
+    env = build_turn_argv(ctx)[1]["env"]
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-1"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "host-token"
+    assert "ANTHROPIC_BASE_URL" not in env
+
+
 def test_turn_argv_full_config(tmp_path):
     """A rich config renders the expected `claude --print` command (VM0 shape)
     + the oauth credential env. (The faithful-port-vs-legacy equivalence was

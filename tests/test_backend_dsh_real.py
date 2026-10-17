@@ -270,6 +270,7 @@ async def test_a_real_web_leaf_runs_scoped(tmp_path, dsh_env):
 
 
 @requires_cli
+@requires_key
 @pytest.mark.asyncio
 async def test_a_dangling_resume_id_is_classified_as_a_stale_session(tmp_path, dsh_env):
     """A resume id DSH no longer knows must be recognised as stale: that is what

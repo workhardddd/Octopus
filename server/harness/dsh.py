@@ -125,6 +125,13 @@ def _dsh_env(
     # injected key means the agent's home never holds a copy of it at rest.
     if credential is not None and credential.secret:
         env["DEEPSEEK_API_KEY"] = credential.secret
+    # The adapter reads the endpoint from the same trusted launch environment
+    # (`DEEPSEEK_BASE_URL`), and the managed home's settings.yaml never pins a
+    # baseURL — so a relay credential redirects the endpoint without touching
+    # anything at rest. Explicit config would outrank this, which is exactly
+    # why `render_settings` must keep leaving the endpoint unset.
+    if credential is not None and credential.base_url:
+        env["DEEPSEEK_BASE_URL"] = credential.base_url
     return env
 
 
@@ -247,7 +254,7 @@ def _prepare_spawn(ctx: TurnContext) -> None:
         )
     from .. import dsh_home
 
-    home = dsh_home.ensure_agent_home(ctx.agent_id)
+    home = dsh_home.ensure_agent_home(ctx.agent_id, model=ctx.model)
     ctx.dsh_home = str(home)
     ctx.dsh_patch = str(
         dsh_home.write_patch(
@@ -269,9 +276,9 @@ def _prepare_oneshot(ctx: OneShotContext) -> None:
     from .. import dsh_home
 
     ctx.dsh_home = str(
-        dsh_home.ensure_agent_home(ctx.agent_id)
+        dsh_home.ensure_agent_home(ctx.agent_id, model=ctx.model)
         if ctx.agent_id
-        else dsh_home.ensure_oneshot_home()
+        else dsh_home.ensure_oneshot_home(model=ctx.model)
     )
 
 

@@ -690,3 +690,74 @@ async def test_patch_renames_a_session_and_rejects_an_empty_name(client):
     assert res.status_code == 400
     assert (await c.patch("/api/sessions/ghost", json={"name": "x"}, headers=AUTH)).status_code == 404
     session_manager.sessions.clear()
+
+
+@pytest.mark.asyncio
+async def test_base_url_round_trips_and_clears(client):
+    """A relay endpoint is stored as plain metadata, returned to clients, and
+    clearable with an empty string (null means "leave untouched")."""
+    c, db = client
+    res = await c.post(
+        "/api/credentials",
+        json={
+            "backend": "dsh",
+            "label": "relay",
+            "secret": "k",
+            "base_url": "https://relay.example",
+        },
+        headers=AUTH,
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert body["base_url"] == "https://relay.example"
+    row = await db.get_credential(body["id"])
+    assert row["base_url"] == "https://relay.example"
+
+    # Swap…
+    res = await c.patch(
+        f"/api/credentials/{body['id']}",
+        json={"base_url": "https://other.example"},
+        headers=AUTH,
+    )
+    assert res.status_code == 200
+    assert res.json()["base_url"] == "https://other.example"
+    # …and clear.
+    res = await c.patch(
+        f"/api/credentials/{body['id']}", json={"base_url": ""}, headers=AUTH
+    )
+    assert res.status_code == 200
+    assert res.json()["base_url"] is None
+    assert (await db.get_credential(body["id"]))["base_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_codex_credential_refuses_a_base_url(client):
+    """Codex's endpoint lives in its CODEX_HOME config.toml provider table —
+    nothing an env var can override. Storing a base_url there would be
+    silently ignored, which is worse than refusing it."""
+    c, _ = client
+    res = await c.post(
+        "/api/credentials",
+        json={
+            "backend": "codex",
+            "label": "x",
+            "secret": "k",
+            "base_url": "https://relay.example",
+        },
+        headers=AUTH,
+    )
+    assert res.status_code == 422
+    assert "codex" in res.json()["detail"]
+
+    # …and the same refusal on an existing row.
+    create = await c.post(
+        "/api/credentials",
+        json={"backend": "codex", "label": "L", "secret": "x"},
+        headers=AUTH,
+    )
+    res = await c.patch(
+        f"/api/credentials/{create.json()['id']}",
+        json={"base_url": "https://relay.example"},
+        headers=AUTH,
+    )
+    assert res.status_code == 422

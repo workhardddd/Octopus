@@ -105,6 +105,57 @@ describe("AgentFormPage", () => {
     );
   });
 
+  it("saves the model field and clears it to null when emptied", async () => {
+    const existing = agent({
+      id: "ag9",
+      name: "Vera",
+      is_system: false,
+      backend: "dsh",
+      model: "deepseek-v4-pro",
+    });
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+      init?.method === "PATCH"
+        ? new Response(JSON.stringify(existing), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        : new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+    );
+    mount("ag9", [existing]);
+    const modelInput = screen.getByLabelText(/^Model/) as HTMLInputElement;
+    expect(modelInput.value).toBe("deepseek-v4-pro");
+
+    // A new id is sent verbatim — the server passes it through as-is.
+    fireEvent.change(modelInput, { target: { value: "my-relay-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, i]) => String(u).endsWith("/ag9") && (i as RequestInit)?.method === "PATCH"
+        )
+      ).toBe(true)
+    );
+    let patch = fetchMock.mock.calls.find(
+      ([u, i]) => String(u).endsWith("/ag9") && (i as RequestInit)?.method === "PATCH"
+    );
+    expect(JSON.parse(patch![1]!.body as string).model).toBe("my-relay-model");
+
+    // Emptying the field clears the agent's model (null), not "".
+    fireEvent.change(modelInput, { target: { value: "  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([u, i]) => String(u).endsWith("/ag9") && (i as RequestInit)?.method === "PATCH"
+        ).length
+      ).toBe(2)
+    );
+    patch = fetchMock.mock.calls.filter(
+      ([u, i]) => String(u).endsWith("/ag9") && (i as RequestInit)?.method === "PATCH"
+    )[1];
+    expect(JSON.parse(patch![1]!.body as string).model).toBeNull();
+  });
+
   it("won't offer Archive on the protected system agent", () => {
     // Scoped by class, not by name: the Archived *tab* also says "Archive…".
     const { container } = mount("ag1", [agent()]);

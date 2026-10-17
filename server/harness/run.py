@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..proc import kill_group, spawn_kwargs, terminate_group
+from ..proc import decode_output, kill_group, resolve_windows_shim, spawn_kwargs, terminate_group
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
 from .profile import (
@@ -116,7 +116,19 @@ def prepare_spawn(
             raise FileNotFoundError(
                 f"{argv[0]} not found on PATH — install the CLI first"
             )
-        argv = [resolved, *argv[1:]]
+        # A .cmd/.bat shim cannot carry a long argv (cmd.exe's 8191-char
+        # limit, reached by every spawn with an inline --mcp-config plus a
+        # persona) — expand it to the program it actually runs. The expanded
+        # argv[0] may be a bare "node" again, so resolve once more.
+        argv = [*resolve_windows_shim(resolved), *argv[1:]]
+        if not os.path.isabs(argv[0]):
+            again = _which_with_fallback(argv[0])
+            if again is None:
+                raise FileNotFoundError(
+                    f"{argv[0]} (from {resolved}) not found on PATH — "
+                    "install the CLI first"
+                )
+            argv = [again, *argv[1:]]
     env = kwargs.get("env") or os.environ.copy()
     cli_dir = os.path.dirname(argv[0]) if argv and os.path.isabs(argv[0]) else None
     env["PATH"] = augmented_path(env.get("PATH"), cli_dir)
@@ -492,7 +504,11 @@ class HarnessRun:
                 )
             ),
             str(Path(working_dir).resolve()),
-            (credential.auth_type + ":" + (credential.secret or "")) if credential else "",
+            (
+                credential.auth_type
+                + ":" + (credential.secret or "")
+                + ":" + (credential.base_url or "")
+            ) if credential else "",
         ]
         return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
 
@@ -718,7 +734,7 @@ class HarnessRun:
         assert self._process and self._process.stdout
         try:
             async for raw in self._process.stdout:
-                line = raw.decode(errors="replace").rstrip("\r\n")
+                line = decode_output(raw).rstrip("\r\n")
                 if not line:
                     continue
                 try:
@@ -747,7 +763,7 @@ class HarnessRun:
         assert self._process and self._process.stderr
         try:
             async for raw in self._process.stderr:
-                line = raw.decode(errors="replace").rstrip("\r\n")
+                line = decode_output(raw).rstrip("\r\n")
                 if line:
                     self._stderr_lines.append(line)
                     logger.debug("CLI stderr: %s", line)
