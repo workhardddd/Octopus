@@ -147,15 +147,47 @@ def claude_cli_works() -> bool:
     return _probe([exe, "--print", "--", "ok"], timeout=60)
 
 
+def _codex_logged_out(exe: str) -> bool:
+    """True when `codex login status` says so — cheaply, before any turn.
+
+    A logged-out `codex exec` does not always fail fast: on 0.115.0 a box with
+    no `~/.codex/auth.json` left the probe hanging with no output at all, which
+    burned its whole 90s+180s budget on the most ordinary state a dev machine
+    is in — and then aborted *collection* with `CliProbeTimeout`, so the whole
+    suite never ran. `login status` answers in milliseconds.
+
+    Only a definite answer short-circuits. Anything unexpected — a timeout, a
+    crash, a non-zero exit that is not the logged-out message — falls through
+    to the real probe, which is still the only thing that can tell us about an
+    *invalidated* token (`auth.json` present, rejected by the server).
+    """
+    try:
+        proc = subprocess.run(
+            [exe, "login", "status"], timeout=15, **CLI_OUTPUT
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode == 0:
+        return False
+    blob = ((proc.stdout or "") + "\n" + (proc.stderr or "")).lower()
+    return "not logged in" in blob
+
+
 @functools.lru_cache(maxsize=1)
 def codex_cli_works() -> bool:
     """True only if `codex` is installed AND actually authenticated. A present
     `~/.codex/auth.json` is NOT sufficient — its token can be invalidated while
     the file lingers (a real 401 we hit in practice). So we probe with a tiny
     real `codex exec`, exactly like the claude gate; a logged-out CLI exits
-    non-zero, so dependent tests skip rather than hollow-pass/fail."""
+    non-zero, so dependent tests skip rather than hollow-pass/fail.
+
+    The explicit logged-out check comes first because that same logged-out CLI
+    can hang instead of exiting (see `_codex_logged_out`), which is a skip, not
+    the "we could not tell" that `CliProbeTimeout` exists to report."""
     exe = _resolve_cli("codex")
     if exe is None:
+        return False
+    if _codex_logged_out(exe):
         return False
     import tempfile
 
